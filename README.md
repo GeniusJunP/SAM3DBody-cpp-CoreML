@@ -6,6 +6,8 @@ Takes a BGR image and produces per-person MHR body pose parameters, camera trans
 
 Also includes Python frontends that call the compiled shared library via ctypes, and a CSV exporter for the 70 MHR keypoints.
 
+![SAM3DBody-cpp](doc/screen.jpg)
+
 ---
 
 ## Models
