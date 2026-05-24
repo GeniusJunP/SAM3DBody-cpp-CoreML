@@ -11,8 +11,8 @@
 #include <string.h>
 #include <math.h>
 
-#include "../../../../../tools/AmMatrix/matrix4x4Tools.h"
-#include "../../../../../tools/AmMatrix/quaternions.h"
+#include "matrix4x4Tools.h"
+#include "quaternions.h"
 
 #define NORMAL   "\033[0m"
 #define BLACK   "\033[30m"      /* Black */

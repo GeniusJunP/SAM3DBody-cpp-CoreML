@@ -14,8 +14,6 @@
 
 #include "glx3.h"
 
-#include "../Scene/scene.h"
-
 GLXDrawable whatToSwap=0;
 GLboolean  doubleBufferGLX3 = GL_TRUE;
 static int dblBuf[]  = {GLX_RGBA, GLX_DEPTH_SIZE, 24, GLX_DOUBLEBUFFER, None};

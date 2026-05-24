@@ -4,8 +4,9 @@ THISDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$THISDIR"
 cd ..
 
-mkdir build
+mkdir -p build
 cd build
-make -j6
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
 
 exit 0
