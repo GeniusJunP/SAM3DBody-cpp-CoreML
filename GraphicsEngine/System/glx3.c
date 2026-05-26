@@ -222,7 +222,7 @@ int start_glx3_stuffWindowed(int WIDTH,int HEIGHT,int argc,const char **argv)
   // Done with the visual info data
   XFree( vi );
 
-  XStoreName( display, win, "OpenGL3.x+ Control Window" );
+  XStoreName( display, win, "SAM3DBody-cpp OpenGL3.x+ Visualization" );
 
   printf( "Mapping window\n" );
   XMapWindow( display, win );
