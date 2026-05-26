@@ -1,195 +1,244 @@
-// bvh_writer.cpp – BVH export for MHR body-pose inference output.
+// bvh_writer.cpp - see bvh_writer.h for the high-level strategy.
 //
-// Euler convention (body joints)
-// ──────────────────────────────
-// rot6d_to_euler → ZYX: euler[0]=rx, [1]=ry, [2]=rz  (radians).
-// compact_cont_to_body_params stores:
-//   body_pose[ BODY_3DOF_JOINT_IDXS[j][0] ] = rx
-//   body_pose[ BODY_3DOF_JOINT_IDXS[j][1] ] = ry
-//   body_pose[ BODY_3DOF_JOINT_IDXS[j][2] ] = rz
-// BVH body channels (non-root): Zrotation Xrotation Yrotation
-//   → at bvh_offset+0 write rz, +1 write rx, +2 write ry.
-//
-// global_rot storage (fast_sam_3dbody.cpp line 917):
-//   r.global_rot = { ge[2], ge[1], ge[0] }  where ge=[rx,ry,rz]
-//   ⟹  global_rot[0]=rz, [1]=ry, [2]=rx
-// BVH hip channels: Xpos Ypos Zpos  Zrot Yrot Xrot
-//   → direct map: buf[3]=rz, buf[4]=ry, buf[5]=rx.
-//
-// Arm/collar/head joints (entries 12–20 in MHR_JOINT_SPECS)
-// ──────────────────────────────────────────────────────────
-// build_model_params() zeroes mhr_model_params[68:121] (body_pose indices 62-115)
-// because the LBS mesh was trained expecting hand-PCA decoded angles there.
-// apply_hand_pose() then fills those slots via the hand PCA decode:
-//   - "right" hand PCA → collar, shoulder, head angles (body_pose 62-88)
-//   - "left"  hand PCA → elbow, wrist angles (body_pose 89-115)
-// So mhr_model_params[6+arm_idx] holds the correct arm angles after apply_hand_pose.
-// r.body_pose[62:115] is near-zero (raw FFN compact-6D output) and must NOT be used.
-//
-// Hand joints
+// Math sketch
 // ───────────
-// apply_hand_pose places the 27 decoded Euler angles per hand directly into
-// mhr_model_params[204] at positions given by hand_joint_idxs_left/right[27].
-// We read those indices from body_model.lbs (version 3 section) and use them
-// to extract angles from MHRResult::mhr_model_params.
+//   joint_params = PT @ model_params[:pt_cols]            // [n_joints*7]
+//   q_euler[j]   = qz(rz) * qy(ry) * qx(rx)               // MHR convention: R=Rz·Ry·Rx
+//   q_local[j]   = pre[j] * q_euler[j]                    // MHR per-joint local rotation
+//   g_q[j]       = g_q[parent] * q_local[j]               // MHR FK
 //
-// DOF order (per hand), from HAND_DOFS_IN_ORDER = [3,1,1, 3,1,1, 3,1,1, 3,1,1, 2,3,1,1]:
-//   params[0..2]  = thumb MCP  (rx,ry,rz)
-//   params[3]     = thumb PIP  (single angle)
-//   params[4]     = thumb DIP
-//   params[5..7]  = index MCP  (rx,ry,rz)
-//   params[8]     = index PIP
-//   params[9]     = index DIP
-//   params[10..12]= middle MCP (rx,ry,rz)
-//   params[13]    = middle PIP
-//   params[14]    = middle DIP
-//   params[15..17]= ring MCP   (rx,ry,rz)
-//   params[18]    = ring PIP
-//   params[19]    = ring DIP
-//   params[20..21]= pinky CMC  (2 angles)
-//   params[22..24]= pinky MCP  (rx,ry,rz)
-//   params[25]    = pinky PIP
-//   params[26]    = pinky DIP
+// For each BVH joint b with matched MHR index m and BVH parent bp:
+//   q_target = g_q_mhr[m]                                  // MHR world orientation of m
+//   q_local_bvh[b] = inv(g_q_bvh[bp]) * q_target
+//   g_q_bvh[b] = q_target
+// Decompose q_local_bvh[b] to ZXY (body) or ZYX (root) Euler angles for the
+// channel order in body.bvh ("Zrotation Xrotation Yrotation" or "Zrotation
+// Yrotation Xrotation").  Going via global quats avoids the rest-pose alignment
+// (R_align) issue: the BVH chain starts identity at the root joint and inherits
+// MHR's global orientation joint-by-joint.
 
 #include "bvh_writer.h"
 #include "fast_sam_3dbody.h"
+#include "mhr_joint_table.h"
 
+extern "C" {
+#include "ModelLoader/model_loader_transform_joints.h"
+}
+
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-static constexpr float RAD2DEG   = 57.29577951308232f;
-static constexpr float POS_SCALE = 100.0f;   // pred_cam_t metres → cm
+namespace {
 
-// Convert SMPL-like ZYX Euler angles (R = Rz·Ry·Rx) to BVH body-joint ZXY Euler
-// angles (BVH applies M = Rz·Rx·Ry for "Zrotation Xrotation Yrotation" channels).
-// Builds the rotation matrix from ZYX then extracts ZXY; avoids gimbal artifacts.
-static void zyx_to_zxy(float rx, float ry, float rz,
-                        float& a /*Zrot*/, float& b /*Xrot*/, float& c /*Yrot*/)
+constexpr float RAD2DEG  = 57.29577951308232f;
+constexpr float POS_SCALE = 100.0f;             // metres → centimetres
+
+// ─── quaternion helpers (XYZW) ──────────────────────────────────────────────
+
+// Hamilton product: r = a * b  (so when rotating v, b is applied first, then a).
+inline void qmul(float* r, const float* a, const float* b)
 {
-    const float crx = cosf(rx), srx = sinf(rx);
-    const float cry = cosf(ry), sry = sinf(ry);
-    const float crz = cosf(rz), srz = sinf(rz);
-
-    // ZYX matrix elements needed for ZXY decomposition:
-    //   R = Rz(rz)*Ry(ry)*Rx(rx)
-    const float R01 = crz*sry*srx - srz*crx;   // R[0][1]
-    const float R11 = srz*sry*srx + crz*crx;   // R[1][1]
-    const float R20 = -sry;                     // R[2][0]
-    const float R21 =  cry*srx;                 // R[2][1]
-    const float R22 =  cry*crx;                 // R[2][2]
-
-    // ZXY decomposition: M = Rz(a)*Rx(b)*Ry(c)
-    //   M[2][1] = sin(b)
-    //   M[2][0] = -cos(b)*sin(c)  →  c = atan2(-M20, M22)
-    //   M[0][1] = -sin(a)*cos(b)  →  a = atan2(-M01, M11)
-    b = asinf(std::max(-1.f, std::min(1.f, R21)));
-    c = atan2f(-R20, R22);
-    a = atan2f(-R01, R11);
+    r[0] = b[0]*a[3] + b[3]*a[0] + b[2]*a[1] - b[1]*a[2];
+    r[1] = b[1]*a[3] - b[2]*a[0] + b[3]*a[1] + b[0]*a[2];
+    r[2] = b[2]*a[3] + b[1]*a[0] - b[0]*a[1] + b[3]*a[2];
+    r[3] = b[3]*a[3] - b[0]*a[0] - b[1]*a[1] - b[2]*a[2];
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Major body joint mapping (22 active + 1 skipped)
-// rx/ry/rz indices taken from BODY_3DOF_JOINT_IDXS in preprocess.hpp.
-// Joint ordering is presumed SMPL-like; validate against mhr_utils.py if needed.
-// ─────────────────────────────────────────────────────────────────────────────
-struct MhrJointSpec {
-    const char* bvh_name;
-    int rx_idx, ry_idx, rz_idx;
-};
-// clang-format off
-static constexpr MhrJointSpec MHR_JOINT_SPECS[23] = {
-    /* 0  L_Hip      */ {"lButtock",  0,   2,   4  },
-    /* 1  R_Hip      */ {"rButtock",  6,   8,   10 },
-    /* 2  Spine1     */ {"abdomen",   12,  13,  14 },
-    /* 3  L_Knee     */ {"lThigh",    15,  16,  17 },
-    /* 4  R_Knee     */ {"rThigh",    18,  19,  20 },
-    /* 5  Spine2     */ {"chest",     21,  22,  23 },
-    /* 6  L_Ankle    */ {"lShin",     24,  25,  26 },
-    /* 7  R_Ankle    */ {"rShin",     27,  28,  29 },
-    /* 8  Spine3→neck1*/{"neck1",     34,  35,  36 },
-    /* 9  L_Foot     */ {"lFoot",     37,  38,  39 },
-    /* 10 R_Foot     */ {"rFoot",     44,  45,  46 },
-    /* 11 Neck       */ {"neck",      53,  54,  55 },
-    /* 12 L_Collar   */ {"lCollar",   64,  65,  66 },
-    /* 13 R_Collar   */ {"rCollar",   85,  69,  73 },
-    /* 14 Head       */ {"head",      86,  70,  79 },
-    /* 15 L_Shoulder */ {"lShldr",    87,  71,  82 },
-    /* 16 R_Shoulder */ {"rShldr",    88,  72,  76 },
-    /* 17 L_Elbow    */ {"lForeArm",  91,  92,  93 },
-    /* 18 R_Elbow    */ {"rForeArm",  112, 96,  100},
-    /* 19 L_Wrist    */ {"lHand",     113, 97,  106},
-    /* 20 R_Wrist    */ {"rHand",     114, 98,  109},
-    /* 21 (skip)     */ {nullptr,     115, 99,  103},
-    /* 22 Jaw        */ {"jaw",       130, 131, 132},
-};
-// clang-format on
+inline void qconj(float* r, const float* a)
+{
+    r[0] = -a[0]; r[1] = -a[1]; r[2] = -a[2]; r[3] = a[3];
+}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BVH hierarchy parser
-// ─────────────────────────────────────────────────────────────────────────────
-static bool parse_bvh_hierarchy(
-    const std::string&                   path,
-    std::string&                         hierarchy_out,
-    std::unordered_map<std::string,int>& name_to_offset,
-    int&                                 total_channels)
+inline void qrot(float* out, const float* q, const float* v)
+{
+    float qx=q[0], qy=q[1], qz=q[2], qw=q[3];
+    float vx=v[0], vy=v[1], vz=v[2];
+    float tx = 2.f*(qy*vz - qz*vy);
+    float ty = 2.f*(qz*vx - qx*vz);
+    float tz = 2.f*(qx*vy - qy*vx);
+    out[0] = vx + qw*tx + (qy*tz - qz*ty);
+    out[1] = vy + qw*ty + (qz*tx - qx*tz);
+    out[2] = vz + qw*tz + (qx*ty - qy*tx);
+}
+
+// MHR Euler (XYZ intrinsic, R = Rz·Ry·Rx) → quaternion.
+// Identical to mhr_euler_xyz_to_quat in model_loader_transform_joints.c.
+inline void euler_mhr_to_quat(float ex, float ey, float ez, float* q)
+{
+    float hx=ex*0.5f, hy=ey*0.5f, hz=ez*0.5f;
+    float qx[4] = { sinf(hx), 0.f,      0.f,      cosf(hx) };
+    float qy[4] = { 0.f,      sinf(hy), 0.f,      cosf(hy) };
+    float qz[4] = { 0.f,      0.f,      sinf(hz), cosf(hz) };
+    float t[4];
+    qmul(t, qz, qy);
+    qmul(q, t,  qx);
+}
+
+// Quaternion (XYZW) → 3×3 row-major rotation matrix.
+inline void quat_to_mat3(const float* q, float m[9])
+{
+    float x=q[0], y=q[1], z=q[2], w=q[3];
+    float xx=x*x, yy=y*y, zz=z*z;
+    float xy=x*y, xz=x*z, yz=y*z;
+    float wx=w*x, wy=w*y, wz=w*z;
+    m[0] = 1 - 2*(yy + zz); m[1] = 2*(xy - wz);     m[2] = 2*(xz + wy);
+    m[3] = 2*(xy + wz);     m[4] = 1 - 2*(xx + zz); m[5] = 2*(yz - wx);
+    m[6] = 2*(xz - wy);     m[7] = 2*(yz + wx);     m[8] = 1 - 2*(xx + yy);
+}
+
+// Decompose R = Rz(a) · Rx(b) · Ry(c)  (BVH non-root channels: Zrot Xrot Yrot).
+//   M[2][1] = sin(b)
+//   M[2][0] = -cos(b) sin(c)   →  c = atan2(-M[2][0], M[2][2])
+//   M[0][1] = -cos(b) sin(a)   →  a = atan2(-M[0][1], M[1][1])
+inline void mat3_to_zxy(const float m[9], float& a, float& b, float& c)
+{
+    float s = std::max(-1.f, std::min(1.f, m[7]));    // m[2][1]
+    b = asinf(s);
+    if (fabsf(m[7]) < 0.99999f) {
+        c = atan2f(-m[6], m[8]);                       // -m[2][0], m[2][2]
+        a = atan2f(-m[1], m[4]);                       // -m[0][1],  m[1][1]
+    } else {
+        // Gimbal: lock Y to zero, solve Z from the remaining DOF.
+        c = 0.f;
+        a = atan2f(m[3], m[0]);
+    }
+}
+
+// Decompose R = Rz(a) · Ry(b) · Rx(c)  (BVH root channels: Zrot Yrot Xrot).
+//   M[2][0] = -sin(b)
+//   M[2][1] = cos(b) sin(c)
+//   M[2][2] = cos(b) cos(c)
+//   M[1][0] = cos(b) sin(a)
+//   M[0][0] = cos(b) cos(a)
+inline void mat3_to_zyx(const float m[9], float& a, float& b, float& c)
+{
+    float s = std::max(-1.f, std::min(1.f, -m[6]));   // -m[2][0]
+    b = asinf(s);
+    if (fabsf(m[6]) < 0.99999f) {
+        c = atan2f(m[7], m[8]);                        //  m[2][1], m[2][2]
+        a = atan2f(m[3], m[0]);                        //  m[1][0], m[0][0]
+    } else {
+        c = 0.f;
+        a = atan2f(-m[1], m[4]);
+    }
+}
+
+// ─── BVH template parsing ───────────────────────────────────────────────────
+
+// Per-joint info collected from the BVH template, in declaration order.
+struct ParsedJoint {
+    std::string name;            // empty for End Site
+    int         parent_idx;      // -1 for root
+    float       offset[3];
+    int         channel_offset;  // -1 if no channels
+    int         n_channels;
+};
+
+// Tiny ASCII parser. Tokens are whitespace-separated; we keep a small ad-hoc
+// state machine for the curly-brace hierarchy.
+bool parse_bvh_template(const std::string& path,
+                        std::string& hierarchy_text,
+                        std::vector<ParsedJoint>& out_joints,
+                        int& out_total_channels)
 {
     FILE* f = fopen(path.c_str(), "r");
     if (!f) {
-        fprintf(stderr, "[BVHWriter] Cannot open template: %s\n", path.c_str());
+        fprintf(stderr, "[BVHWriter] cannot open template '%s'\n", path.c_str());
         return false;
     }
 
-    char        line[4096];
-    std::string hierarchy;
-    int         channel_cursor = 0;
-    bool        found_motion   = false;
-    char        pending_joint[256] = "";
+    out_joints.clear();
+    hierarchy_text.clear();
+    out_total_channels = 0;
 
+    std::vector<int> stack;          // parent indices
+    int  channel_cursor = 0;
+    bool found_motion  = false;
+
+    enum PendingKind { PEND_NONE, PEND_NAMED, PEND_END_SITE };
+    PendingKind pending_kind = PEND_NONE;
+    std::string pending_name;
+
+    char line[4096];
     while (fgets(line, sizeof(line), f))
     {
         const char* p = line;
         while (*p == ' ' || *p == '\t') ++p;
 
         if (strncmp(p, "MOTION", 6) == 0 &&
-            (p[6]=='\n' || p[6]=='\r' || p[6]=='\0'))
+            (p[6]=='\n' || p[6]=='\r' || p[6]=='\0' || p[6]==' ' || p[6]=='\t'))
         {
             found_motion = true;
             break;
         }
 
-        hierarchy += line;
+        hierarchy_text += line;
 
-        if ( (strncmp(p,"ROOT", 4)==0 && (p[4]==' '||p[4]=='\t')) ||
-             (strncmp(p,"JOINT",5)==0 && (p[5]==' '||p[5]=='\t')) )
+        // ROOT name / JOINT name
+        if ((strncmp(p,"ROOT", 4)==0 && (p[4]==' '||p[4]=='\t')) ||
+            (strncmp(p,"JOINT",5)==0 && (p[5]==' '||p[5]=='\t')))
         {
             const char* q = p + ((p[0]=='R') ? 4 : 5);
             while (*q==' '||*q=='\t') ++q;
-            size_t n = 0;
-            while (q[n] && q[n]!=' ' && q[n]!='\t' && q[n]!='\r' && q[n]!='\n') ++n;
-            if (n > 0 && n < sizeof(pending_joint)) {
-                memcpy(pending_joint, q, n);
-                pending_joint[n] = '\0';
-            }
+            const char* qend = q;
+            while (*qend && *qend!=' ' && *qend!='\t' && *qend!='\r' && *qend!='\n') ++qend;
+            pending_kind = PEND_NAMED;
+            pending_name.assign(q, qend - q);
             continue;
         }
 
         if (strncmp(p, "End Site", 8) == 0) {
-            pending_joint[0] = '\0';
+            pending_kind = PEND_END_SITE;
+            pending_name.clear();
+            continue;
+        }
+
+        if (*p == '{') {
+            // create the pending joint now so OFFSET/CHANNELS attach to it
+            ParsedJoint j;
+            j.name           = (pending_kind == PEND_NAMED) ? pending_name : std::string();
+            j.parent_idx     = stack.empty() ? -1 : stack.back();
+            j.offset[0]=j.offset[1]=j.offset[2]=0.f;
+            j.channel_offset = -1;
+            j.n_channels     = 0;
+            int idx = (int)out_joints.size();
+            out_joints.push_back(j);
+            stack.push_back(idx);
+            pending_kind = PEND_NONE;
+            pending_name.clear();
+            continue;
+        }
+
+        if (*p == '}') {
+            if (!stack.empty()) stack.pop_back();
+            continue;
+        }
+
+        if (strncmp(p, "OFFSET", 6) == 0 && (p[6]==' '||p[6]=='\t')) {
+            if (!stack.empty()) {
+                ParsedJoint& j = out_joints[stack.back()];
+                sscanf(p + 6, "%f %f %f", &j.offset[0], &j.offset[1], &j.offset[2]);
+            }
             continue;
         }
 
         if (strncmp(p, "CHANNELS", 8) == 0 && (p[8]==' '||p[8]=='\t')) {
             int n_ch = 0;
             sscanf(p + 8, "%d", &n_ch);
-            if (pending_joint[0] != '\0') {
-                name_to_offset[std::string(pending_joint)] = channel_cursor;
-                pending_joint[0] = '\0';
+            if (!stack.empty() && n_ch > 0) {
+                ParsedJoint& j = out_joints[stack.back()];
+                j.channel_offset = channel_cursor;
+                j.n_channels     = n_ch;
+                channel_cursor  += n_ch;
+            } else if (n_ch > 0) {
+                channel_cursor += n_ch;     // safety net; shouldn't happen
             }
-            channel_cursor += n_ch;
             continue;
         }
     }
@@ -197,61 +246,441 @@ static bool parse_bvh_hierarchy(
     fclose(f);
 
     if (!found_motion) {
-        fprintf(stderr, "[BVHWriter] Template '%s' has no MOTION section.\n", path.c_str());
+        fprintf(stderr, "[BVHWriter] template '%s' has no MOTION block\n", path.c_str());
         return false;
     }
 
-    hierarchy_out  = std::move(hierarchy);
-    total_channels = channel_cursor;
+    out_total_channels = channel_cursor;
     return true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BVHWriter::open
-// ─────────────────────────────────────────────────────────────────────────────
+}  // namespace
+
+// ─── BVH rest-pose world positions ──────────────────────────────────────────
+
+void BVHWriter::compute_bvh_rest_positions()
+{
+    // BVH rest pose: all rotations zero, root translation zero.
+    // World position of each joint = parent's world pos + own OFFSET.
+    for (auto& j : joints_) {
+        if (j.parent < 0) {
+            j.rest_world[0] = j.offset[0];
+            j.rest_world[1] = j.offset[1];
+            j.rest_world[2] = j.offset[2];
+        } else {
+            const BvhJoint& p = joints_[j.parent];
+            j.rest_world[0] = p.rest_world[0] + j.offset[0];
+            j.rest_world[1] = p.rest_world[1] + j.offset[1];
+            j.rest_world[2] = p.rest_world[2] + j.offset[2];
+        }
+    }
+}
+
+// ─── Explicit BVH-name → MHR-name table ────────────────────────────────────
+//
+// Built by hand against body.bvh (MakeHuman) and the MHR joint names exported
+// from mhr_model.pt (see scripts/build_joint_table.py).  Names not listed here
+// are left unmapped — their BVH channels stay at zero, which is what we want
+// for joints MHR doesn't model (BVH face details, buttocks, BVH toes, etc.).
+namespace {
+struct NameMap { const char* bvh; const char* mhr; };
+
+constexpr NameMap NAME_MAP[] = {
+    // ── Spine ────────────────────────────────────────────────────────────
+    { "hip",        "root"      },
+    { "abdomen",    "c_spine1"  },
+    { "chest",      "c_spine3"  },
+    { "neck",       "c_neck"    },
+    { "head",       "c_head"    },
+    { "jaw",        "c_jaw"     },
+
+    // ── Left arm ─────────────────────────────────────────────────────────
+    { "lCollar",    "l_clavicle"},
+    { "lShldr",     "l_uparm"   },
+    { "lForeArm",   "l_lowarm"  },
+    { "lHand",      "l_wrist"   },
+
+    // ── Right arm ────────────────────────────────────────────────────────
+    { "rCollar",    "r_clavicle"},
+    { "rShldr",     "r_uparm"   },
+    { "rForeArm",   "r_lowarm"  },
+    { "rHand",      "r_wrist"   },
+
+    // ── Left leg (BVH lButtock skipped — no analogue in MHR) ─────────────
+    { "lThigh",     "l_upleg"   },
+    { "lShin",      "l_lowleg"  },
+    { "lFoot",      "l_foot"    },
+
+    // ── Right leg ────────────────────────────────────────────────────────
+    { "rThigh",     "r_upleg"   },
+    { "rShin",      "r_lowleg"  },
+    { "rFoot",      "r_foot"    },
+
+    // ── Left hand fingers (BVH finger2..5 = index/middle/ring/pinky;
+    //    finger1 = thumb).  Metacarpals are BVH-only and stay at zero. ────
+    { "finger1-2.l", "l_thumb2" },
+    { "finger1-3.l", "l_thumb3" },
+    { "rthumb",      "l_thumb1" },  // intentionally lower-case 'rthumb' as found in body.bvh
+
+    { "finger2-1.l", "l_index1" },
+    { "finger2-2.l", "l_index2" },
+    { "finger2-3.l", "l_index3" },
+
+    { "finger3-1.l", "l_middle1"},
+    { "finger3-2.l", "l_middle2"},
+    { "finger3-3.l", "l_middle3"},
+
+    { "finger4-1.l", "l_ring1"  },
+    { "finger4-2.l", "l_ring2"  },
+    { "finger4-3.l", "l_ring3"  },
+
+    { "finger5-1.l", "l_pinky1" },
+    { "finger5-2.l", "l_pinky2" },
+    { "finger5-3.l", "l_pinky3" },
+
+    // ── Right hand fingers ───────────────────────────────────────────────
+    { "finger1-2.r", "r_thumb2" },
+    { "finger1-3.r", "r_thumb3" },
+
+    { "finger2-1.r", "r_index1" },
+    { "finger2-2.r", "r_index2" },
+    { "finger2-3.r", "r_index3" },
+
+    { "finger3-1.r", "r_middle1"},
+    { "finger3-2.r", "r_middle2"},
+    { "finger3-3.r", "r_middle3"},
+
+    { "finger4-1.r", "r_ring1"  },
+    { "finger4-2.r", "r_ring2"  },
+    { "finger4-3.r", "r_ring3"  },
+
+    { "finger5-1.r", "r_pinky1" },
+    { "finger5-2.r", "r_pinky2" },
+    { "finger5-3.r", "r_pinky3" },
+};
+}  // namespace
+
+bool BVHWriter::match_bvh_to_mhr()
+{
+    if (!lbs_) return false;
+    const int  nj = lbs_->n_joints;
+    const int* parents = lbs_->joint_parents;
+    const float* offs  = lbs_->joint_offsets;
+    const float* pre   = lbs_->joint_prerotations;
+
+    // FK over MHR with zero pose. Stores rest joint quaternions in
+    // q_global_mhr_rest_ for use in build_frame_row().
+    q_global_mhr_rest_.assign((size_t)nj * 4, 0.f);
+    std::vector<float> g_t(nj * 3, 0.f);
+    for (int j = 0; j < nj; ++j) {
+        const float* p_q = pre + j*4;          // q_local = pre (zero euler ⇒ q_euler = identity)
+        int parent = parents[j];
+        if (parent < 0) {
+            g_t[j*3+0] = offs[j*3+0];
+            g_t[j*3+1] = offs[j*3+1];
+            g_t[j*3+2] = offs[j*3+2];
+            memcpy(&q_global_mhr_rest_[j*4], p_q, 4*sizeof(float));
+        } else {
+            float rt[3];
+            qrot(rt, &q_global_mhr_rest_[parent*4], offs + j*3);
+            g_t[j*3+0] = g_t[parent*3+0] + rt[0];
+            g_t[j*3+1] = g_t[parent*3+1] + rt[1];
+            g_t[j*3+2] = g_t[parent*3+2] + rt[2];
+            qmul(&q_global_mhr_rest_[j*4], &q_global_mhr_rest_[parent*4], p_q);
+        }
+    }
+
+    // The MHR internal frame already uses +Y up (the LBS-output flip is just
+    // for the camera-facing display frame).  Keep g_t as-is; we'll determine
+    // whether any axis flip is needed by inspecting the rest-pose layout below.
+    std::vector<float> mhr_world_bvh_frame(nj * 3);
+    for (int j = 0; j < nj; ++j) {
+        mhr_world_bvh_frame[j*3+0] = g_t[j*3+0];
+        mhr_world_bvh_frame[j*3+1] = g_t[j*3+1];
+        mhr_world_bvh_frame[j*3+2] = g_t[j*3+2];
+    }
+
+    // The MHR skeleton has body_world(j0) as a virtual root at the body's TOP
+    // and root(j1) as the hip — that's the one body.bvh's "hip" corresponds to.
+    // Translate so MHR's "root" lands on BVH's hip OFFSET.
+    int mhr_hip = -1;
+    for (int j = 0; j < nj; ++j) {
+        if (strcmp(mhr_joint_table::NAMES[j], "root") == 0) { mhr_hip = j; break; }
+    }
+    if (mhr_hip < 0) {
+        fprintf(stderr, "[BVHWriter] could not find 'root' in MHR joint table\n");
+        return false;
+    }
+    float dx = joints_[root_idx_].rest_world[0] - mhr_world_bvh_frame[mhr_hip*3+0];
+    float dy = joints_[root_idx_].rest_world[1] - mhr_world_bvh_frame[mhr_hip*3+1];
+    float dz = joints_[root_idx_].rest_world[2] - mhr_world_bvh_frame[mhr_hip*3+2];
+    for (int j = 0; j < nj; ++j) {
+        mhr_world_bvh_frame[j*3+0] += dx;
+        mhr_world_bvh_frame[j*3+1] += dy;
+        mhr_world_bvh_frame[j*3+2] += dz;
+    }
+
+    // Optional rest-pose dump (set BVH_WRITER_DUMP=1 to enable).
+    if (const char* env = getenv("BVH_WRITER_DUMP")) {
+        if (env[0] == '1') {
+            FILE* dbg = fopen("/tmp/bvh_writer_skeletons.csv", "w");
+            if (dbg) {
+                fprintf(dbg, "side,name,parent,x,y,z\n");
+                for (size_t i = 0; i < joints_.size(); ++i) {
+                    const BvhJoint& j = joints_[i];
+                    if (j.name.empty()) continue;
+                    fprintf(dbg, "bvh,%s,%d,%.6f,%.6f,%.6f\n",
+                            j.name.c_str(), j.parent,
+                            j.rest_world[0], j.rest_world[1], j.rest_world[2]);
+                }
+                for (int j = 0; j < nj; ++j) {
+                    fprintf(dbg, "mhr,j%d,%d,%.6f,%.6f,%.6f\n",
+                            j, parents[j],
+                            mhr_world_bvh_frame[j*3+0],
+                            mhr_world_bvh_frame[j*3+1],
+                            mhr_world_bvh_frame[j*3+2]);
+                }
+                fclose(dbg);
+                fprintf(stderr, "[BVHWriter] wrote /tmp/bvh_writer_skeletons.csv\n");
+            }
+        }
+    }
+
+    // Build BVH-name → MHR-index lookup using the explicit NAME_MAP table.
+    // For each mapping, print the rest-pose Euclidean distance between the
+    // two skeletons so we can spot mis-pairings.
+    std::unordered_map<std::string, int> mhr_name_to_idx;
+    for (int j = 0; j < mhr_joint_table::N_JOINTS; ++j)
+        mhr_name_to_idx[mhr_joint_table::NAMES[j]] = j;
+
+    std::unordered_map<std::string, const char*> bvh_to_mhr_name;
+    for (const auto& nm : NAME_MAP) bvh_to_mhr_name[nm.bvh] = nm.mhr;
+
+    int n_named = 0;
+    int n_matched = 0;
+    float worst_d = 0.f; std::string worst_name;
+
+    for (size_t i = 0; i < joints_.size(); ++i) {
+        BvhJoint& bj = joints_[i];
+        bj.mhr_idx = -1;
+        if (bj.name.empty() || bj.n_channels == 0) continue;
+        ++n_named;
+
+        auto it = bvh_to_mhr_name.find(bj.name);
+        if (it == bvh_to_mhr_name.end()) continue;
+
+        auto mi = mhr_name_to_idx.find(it->second);
+        if (mi == mhr_name_to_idx.end()) {
+            fprintf(stderr, "[BVHWriter] WARNING: mapping target '%s' not in MHR table\n",
+                    it->second);
+            continue;
+        }
+
+        int mhr_idx = mi->second;
+        bj.mhr_idx = mhr_idx;
+        ++n_matched;
+
+        float dxj = mhr_world_bvh_frame[mhr_idx*3+0] - bj.rest_world[0];
+        float dyj = mhr_world_bvh_frame[mhr_idx*3+1] - bj.rest_world[1];
+        float dzj = mhr_world_bvh_frame[mhr_idx*3+2] - bj.rest_world[2];
+        float d   = sqrtf(dxj*dxj + dyj*dyj + dzj*dzj);
+        if (d > worst_d) { worst_d = d; worst_name = bj.name; }
+    }
+
+    fprintf(stderr,
+            "[BVHWriter] explicit-name match: %d / %d named BVH joints "
+            "(worst rest-pose offset: %s d=%.2f cm)\n",
+            n_matched, n_named, worst_name.c_str(), worst_d);
+
+    return n_matched > 0;
+}
+
+// ─── Per-frame MHR-side FK ─────────────────────────────────────────────────
+
+void BVHWriter::compute_per_frame_mhr_state(const fsb::MHRResult& r)
+{
+    const int nj   = lbs_->n_joints;
+    const int npc  = lbs_->pt_cols;
+    const float* PT = lbs_->PT;
+    const float* pre = lbs_->joint_prerotations;
+    const int*  parents = lbs_->joint_parents;
+
+    // joint_params = PT · model_params (PT input width = pt_cols; model_params is 204).
+    const int take = std::min(npc, 204);
+    for (int row = 0; row < nj * 7; ++row) {
+        const float* prow = PT + (size_t)row * npc;
+        float acc = 0.f;
+        for (int k = 0; k < take; ++k) acc += prow[k] * r.mhr_model_params[k];
+        joint_params_[row] = acc;
+    }
+
+    // q_local[j] = pre[j] * euler(rx, ry, rz)
+    // g_q[j]     = g_q[parent] * q_local[j]
+    for (int j = 0; j < nj; ++j) {
+        const float* jp = &joint_params_[j * 7];
+        float q_euler[4];
+        euler_mhr_to_quat(jp[3], jp[4], jp[5], q_euler);
+        qmul(&q_local_[j*4], pre + j*4, q_euler);
+        int p = parents[j];
+        if (p < 0) memcpy(&q_global_mhr_[j*4], &q_local_[j*4], 4*sizeof(float));
+        else       qmul(&q_global_mhr_[j*4], &q_global_mhr_[p*4], &q_local_[j*4]);
+    }
+}
+
+// ─── Build one BVH motion row ───────────────────────────────────────────────
+//
+// Math
+// ────
+//   delta_mhr[j]  = g_q_mhr[j] · conj(g_q_mhr_rest[j])    (world delta in MHR frame)
+//   delta_bvh[j]  = S · delta_mhr[j] · S⁻¹                (world delta in BVH frame)
+//   R_local_bvh[b] = inv(delta_bvh[bp]) · delta_bvh[b]
+//                  = S · inv(delta_mhr[bp]) · delta_mhr[b] · S⁻¹
+//
+//   In quaternion form, conjugation by S = diag(1,-1,-1) is just (qx,-qy,-qz,qw).
+//
+// Why deltas?
+//   BVH rest is identity at every joint; MHR rest has prerotations baked in.
+//   We must compare CURRENT rotation to REST in MHR before assigning to BVH.
+
+void BVHWriter::build_frame_row(const fsb::MHRResult& r, float* row)
+{
+    memset(row, 0, total_channels_ * sizeof(float));
+    if (!lbs_) return;
+
+    compute_per_frame_mhr_state(r);
+
+    auto delta_mhr = [&](int m, float* out)
+    {
+        // out = q_global_mhr_[m] * conj(q_global_mhr_rest_[m])
+        float inv_rest[4]; qconj(inv_rest, &q_global_mhr_rest_[m * 4]);
+        qmul(out, &q_global_mhr_[m * 4], inv_rest);
+    };
+
+    for (size_t bi = 0; bi < joints_.size(); ++bi) {
+        BvhJoint& bj = joints_[bi];
+        if (bj.n_channels == 0) continue;
+        if (bj.mhr_idx   <  0)  continue;
+
+        float q_delta_self[4]; delta_mhr(bj.mhr_idx, q_delta_self);
+
+        float q_local_bvh[4];
+        if (bj.parent < 0) {
+            memcpy(q_local_bvh, q_delta_self, 4*sizeof(float));
+        } else {
+            int pj = bj.parent, mp = -1;
+            while (pj >= 0) {
+                if (joints_[pj].mhr_idx >= 0 && joints_[pj].n_channels > 0) {
+                    mp = joints_[pj].mhr_idx; break;
+                }
+                pj = joints_[pj].parent;
+            }
+            if (mp < 0) {
+                memcpy(q_local_bvh, q_delta_self, 4*sizeof(float));
+            } else {
+                float q_delta_par[4]; delta_mhr(mp, q_delta_par);
+                float inv_par[4]; qconj(inv_par, q_delta_par);
+                qmul(q_local_bvh, inv_par, q_delta_self);
+            }
+        }
+
+        // MHR internal frame and BVH frame agree on all three axes (verified
+        // by rest-pose dump); no quaternion sign flip needed.
+
+        float m[9]; quat_to_mat3(q_local_bvh, m);
+
+        if (bj.is_root && bj.n_channels == 6) {
+            // Root channels: Xpos Ypos Zpos  Zrot Yrot Xrot.
+            row[bj.channel_offset + 0] = r.pred_cam_t[0] * POS_SCALE;
+            row[bj.channel_offset + 1] = r.pred_cam_t[1] * POS_SCALE;
+            row[bj.channel_offset + 2] = r.pred_cam_t[2] * POS_SCALE;
+            float a, b, c;
+            mat3_to_zyx(m, a, b, c);
+            row[bj.channel_offset + 3] = a * RAD2DEG;
+            row[bj.channel_offset + 4] = b * RAD2DEG;
+            row[bj.channel_offset + 5] = c * RAD2DEG;
+        } else if (bj.n_channels == 3) {
+            // Body-joint channels: Zrot Xrot Yrot.
+            float a, b, c;
+            mat3_to_zxy(m, a, b, c);
+            row[bj.channel_offset + 0] = a * RAD2DEG;
+            row[bj.channel_offset + 1] = b * RAD2DEG;
+            row[bj.channel_offset + 2] = c * RAD2DEG;
+        }
+    }
+}
+
+// ─── BVHWriter::open ────────────────────────────────────────────────────────
+
 bool BVHWriter::open(const std::string& template_path,
                      const std::string& out_path,
-                     float frame_time,
-                     const std::string& /*lbs_path*/)
+                     float              frame_time,
+                     const std::string& lbs_path)
 {
+    // Parse the BVH template.
     std::string hierarchy;
-    std::unordered_map<std::string,int> name_to_offset;
+    std::vector<ParsedJoint> parsed;
     int total_ch = 0;
-
-    if (!parse_bvh_hierarchy(template_path, hierarchy, name_to_offset, total_ch))
+    if (!parse_bvh_template(template_path, hierarchy, parsed, total_ch))
         return false;
-
     if (total_ch <= 0) {
-        fprintf(stderr, "[BVHWriter] Template parsed 0 channels.\n");
+        fprintf(stderr, "[BVHWriter] template parsed 0 channels\n");
         return false;
     }
-    if (total_ch != 498) {
-        fprintf(stderr,
-                "[BVHWriter] Warning: template has %d channels (expected 498).\n",
-                total_ch);
+
+    // Transfer parsed joints into our internal struct.
+    joints_.clear();
+    joints_.reserve(parsed.size());
+    root_idx_ = -1;
+    for (size_t i = 0; i < parsed.size(); ++i) {
+        const ParsedJoint& pj = parsed[i];
+        BvhJoint bj;
+        bj.name           = pj.name;
+        bj.parent         = pj.parent_idx;
+        bj.offset[0]      = pj.offset[0];
+        bj.offset[1]      = pj.offset[1];
+        bj.offset[2]      = pj.offset[2];
+        bj.channel_offset = pj.channel_offset;
+        bj.n_channels     = pj.n_channels;
+        bj.rest_world[0]=bj.rest_world[1]=bj.rest_world[2]=0.f;
+        bj.mhr_idx        = -1;
+        bj.is_root        = (pj.parent_idx < 0);
+        joints_.push_back(bj);
+        if (bj.is_root && root_idx_ < 0) root_idx_ = (int)i;
+    }
+    if (root_idx_ < 0) {
+        fprintf(stderr, "[BVHWriter] template has no root joint\n");
+        return false;
     }
 
-    // ── Resolve major body joints ────────────────────────────────────────────
-    for (int j = 0; j < 23; ++j) {
-        resolved_[j].bvh_offset = -1;
-        resolved_[j].rx_idx     = MHR_JOINT_SPECS[j].rx_idx;
-        resolved_[j].ry_idx     = MHR_JOINT_SPECS[j].ry_idx;
-        resolved_[j].rz_idx     = MHR_JOINT_SPECS[j].rz_idx;
+    compute_bvh_rest_positions();
 
-        const char* bvh_name = MHR_JOINT_SPECS[j].bvh_name;
-        if (!bvh_name) continue;
-
-        auto it = name_to_offset.find(bvh_name);
-        if (it == name_to_offset.end())
-            fprintf(stderr, "[BVHWriter] Warning: joint '%s' not found.\n", bvh_name);
-        else
-            resolved_[j].bvh_offset = it->second;
+    // Load the MHR LBS data (PT, joint_offsets, joint_prerotations, joint_parents).
+    if (lbs_path.empty()) {
+        fprintf(stderr, "[BVHWriter] lbs_path is empty — cannot match BVH joints\n");
+        return false;
+    }
+    lbs_ = mhr_lbs_load(lbs_path.c_str());
+    if (!lbs_) {
+        fprintf(stderr, "[BVHWriter] mhr_lbs_load('%s') failed\n", lbs_path.c_str());
+        return false;
+    }
+    // Match BVH joint names to MHR joint indices.
+    if (!match_bvh_to_mhr()) {
+        fprintf(stderr, "[BVHWriter] failed to match any BVH joint to MHR\n");
+        mhr_lbs_free(lbs_); lbs_ = nullptr;
+        return false;
     }
 
-    // ── Open output file ─────────────────────────────────────────────────────
+    // Allocate scratch buffers.
+    joint_params_.assign((size_t)lbs_->n_joints * 7, 0.f);
+    q_local_.assign     ((size_t)lbs_->n_joints * 4, 0.f);
+    q_global_mhr_.assign((size_t)lbs_->n_joints * 4, 0.f);
+
+    // Open output and write the hierarchy.
     file_ = fopen(out_path.c_str(), "wb");
     if (!file_) {
-        fprintf(stderr, "[BVHWriter] Cannot open output: %s\n", out_path.c_str());
+        fprintf(stderr, "[BVHWriter] cannot open output '%s'\n", out_path.c_str());
+        mhr_lbs_free(lbs_); lbs_ = nullptr;
         return false;
     }
 
@@ -264,96 +693,31 @@ bool BVHWriter::open(const std::string& template_path,
     frames_pos_ = ftell(file_);
     fprintf(file_, "Frames: %10d\n", 0);
     fprintf(file_, "Frame Time: %.6f\n", frame_time_);
-
     return true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BVHWriter::build_frame
-// ─────────────────────────────────────────────────────────────────────────────
-void BVHWriter::build_frame(const fsb::MHRResult& r, float* buf) const
-{
-    // ── Root joint (hip) – channels 0-5
-    //    Xposition Yposition Zposition  Zrotation Yrotation Xrotation
-    buf[0] = r.pred_cam_t[0] * POS_SCALE;
-    buf[1] = r.pred_cam_t[1] * POS_SCALE;
-    buf[2] = r.pred_cam_t[2] * POS_SCALE;
-    // global_rot = [rz, ry, rx] → direct map to Zrot/Yrot/Xrot
-    buf[3] = r.global_rot[0] * RAD2DEG;
-    buf[4] = r.global_rot[1] * RAD2DEG;
-    buf[5] = r.global_rot[2] * RAD2DEG;
+// ─── BVHWriter::write_frame ────────────────────────────────────────────────
 
-    // ── Major body joints (BVH ZXY: Zrot Xrot Yrot; SMPL-like ZYX → converted via zyx_to_zxy)
-    //
-    // Source for each body_pose index:
-    //   idx 0..61   → mhr_model_params[6+idx] == body_pose[idx]  (spine, hips, knees …)
-    //   idx 62..115 → mhr_model_params[6+idx]  ← apply_hand_pose places the correct
-    //                  arm/collar/head angles here via the hand-PCA decode.  r.body_pose
-    //                  at these indices is near-zero (raw FFN compact-rep output).
-    //   idx 116..129→ mhr_model_params[6+idx] == body_pose[idx]  (remaining joints)
-    //   idx 130..132→ body_pose[idx]  (jaw; [6+130] would land in the scales region)
-    if ((int)r.body_pose.size() >= 133 &&
-        (int)r.mhr_model_params.size() >= 136) {
-        const float* bp = r.body_pose.data();
-        const float* mp = r.mhr_model_params.data();
-        for (int j = 0; j < 23; ++j) {
-            const ResolvedJoint& rj = resolved_[j];
-            if (rj.bvh_offset < 0) continue;
-            // For each channel pick the source with valid arm angles.
-            auto get = [&](int idx) -> float {
-                return (idx < 130) ? mp[6 + idx] : bp[idx];
-            };
-            // SMPL-like data gives ZYX Euler (rx,ry,rz); BVH "Zrot Xrot Yrot" is ZXY.
-            // Re-decompose so the BVH player reconstructs the exact same rotation.
-            float za, xb, yc;
-            zyx_to_zxy(get(rj.rx_idx), get(rj.ry_idx), get(rj.rz_idx), za, xb, yc);
-            buf[rj.bvh_offset + 0] = za * RAD2DEG;   // Zrotation
-            buf[rj.bvh_offset + 1] = xb * RAD2DEG;   // Xrotation
-            buf[rj.bvh_offset + 2] = yc * RAD2DEG;   // Yrotation
-        }
-    }
-
-}
-// Note: finger/hand BVH channels are left at zero.
-// The MHR model's "hand PCA" encodes arm joints (collar, shoulder, elbow, wrist),
-// not individual finger poses.  There is no per-finger prediction in this model.
-
-// ─────────────────────────────────────────────────────────────────────────────
-// BVHWriter::write_frame
-// ─────────────────────────────────────────────────────────────────────────────
 void BVHWriter::write_frame(const std::vector<fsb::MHRResult>& results)
 {
-    if (!file_) return;
+    if (!file_ || !lbs_) return;
 
-    static constexpr int STACK_MAX = 1024;
-    float        stack_buf[STACK_MAX];
-    std::vector<float> heap_buf;
-    float* buf;
-
-    if (total_channels_ <= STACK_MAX) {
-        buf = stack_buf;
-    } else {
-        heap_buf.assign(total_channels_, 0.f);
-        buf = heap_buf.data();
-    }
-    memset(buf, 0, total_channels_ * sizeof(float));
-
+    // One contiguous row, large enough for the template (body.bvh is ~498 chans).
+    std::vector<float> row(total_channels_, 0.f);
     if (!results.empty())
-        build_frame(results[0], buf);
+        build_frame_row(results[0], row.data());
 
     for (int i = 0; i < total_channels_; ++i) {
         if (i > 0) fputc(' ', file_);
-        if (buf[i] == 0.f) fputc('0', file_);
-        else fprintf(file_, "%.4f", buf[i]);
+        if (row[i] == 0.f)        fputc('0', file_);
+        else                      fprintf(file_, "%.4f", row[i]);
     }
     fputc('\n', file_);
-
     ++frame_count_;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BVHWriter::close
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── BVHWriter::close ──────────────────────────────────────────────────────
+
 void BVHWriter::close()
 {
     if (!file_) return;
@@ -361,5 +725,7 @@ void BVHWriter::close()
     fprintf(file_, "Frames: %10d\n", frame_count_);
     fclose(file_);
     file_ = nullptr;
-    printf("[BVHWriter] Wrote %d frame(s).\n", frame_count_);
+    printf("[BVHWriter] wrote %d frames\n", frame_count_);
+
+    if (lbs_) { mhr_lbs_free(lbs_); lbs_ = nullptr; }
 }
