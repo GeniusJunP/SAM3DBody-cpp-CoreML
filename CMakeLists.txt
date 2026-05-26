@@ -160,17 +160,33 @@ add_subdirectory(AmMatrix)
 # ---------------------------------------------------------------------------
 # fast_sam_3dbody  library
 # ---------------------------------------------------------------------------
+set(MOCAP_DIR ${GRAPHICS_ENGINE_DIR}/MotionCaptureLoader)
+set(TRAJ_DIR  ${GRAPHICS_ENGINE_DIR}/TrajectoryParser)
+
 add_library(fast_sam_3dbody SHARED
     src/fast_sam_3dbody.cpp
     src/fast_sam_3dbody_capi.cpp
     src/bvh_writer.cpp
     ${GRAPHICS_ENGINE_DIR}/ModelLoader/model_loader_tri.c
     ${GRAPHICS_ENGINE_DIR}/ModelLoader/model_loader_transform_joints.c
+    # MotionCaptureLoader (BVH I/O) ------------------------------------------------
+    ${MOCAP_DIR}/bvh_loader.c
+    ${MOCAP_DIR}/calculate/bvh_project.c
+    ${MOCAP_DIR}/calculate/bvh_transform.c
+    ${MOCAP_DIR}/calculate/bvh_to_tri_pose.c
+    ${MOCAP_DIR}/calculate/smoothing.c
+    ${MOCAP_DIR}/export/bvh_to_bvh.c
+    ${MOCAP_DIR}/edit/bvh_cut_paste.c
+    ${MOCAP_DIR}/edit/bvh_rename.c
+    ${MOCAP_DIR}/import/fromBVH.c
+    ${TRAJ_DIR}/InputParser_C.c
 )
 
 target_include_directories(fast_sam_3dbody PUBLIC
     src
     ${GRAPHICS_ENGINE_DIR}
+    ${MOCAP_DIR}
+    ${TRAJ_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/AmMatrix
     ${ggml_SOURCE_DIR}/include
     ${ORT_INCLUDE_DIRS}
