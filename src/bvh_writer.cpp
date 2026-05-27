@@ -890,6 +890,79 @@ bool BVHWriter::dump_one_person(const PerPerson& p)
     if (ok) printf("[BVHWriter] wrote %d frames → %s\n", p.frame_count, path.c_str());
     else    fprintf(stderr, "[BVHWriter] dumpBVHToBVH('%s') failed\n", path.c_str());
 
+    // ── BVHTester-compatibility heads-up ────────────────────────────────────
+    // BVHTester (./RGBDAcquisition/.../BVHTester) silently culls frames whose
+    // root sits outside its default visible volume — the user discovers this
+    // when the BVH "plays correctly in Blender but renders an empty scene in
+    // BVHTester."  Since pred_cam_t directly drives the hip's BVH position
+    // (× 100 to convert m → cm), the typical MHR output places the hip at
+    // Z ≈ +200..+500 cm (subject-in-front-of-camera) which is exactly the
+    // region BVHTester rejects as "behind camera".
+    //
+    // We always print the observed root XYZ range so users can sanity-check
+    // their numbers, and only emit the load-bearing "use --setPositionRotation"
+    // suggestion when the path leaves a conservative ±200 cm cube on any
+    // axis — that threshold catches every realistic MHR run while staying
+    // quiet on BVHs that BVHTester would already play directly (e.g. a
+    // hand-edited or MocapNET-style clip with the hip already centred).
+    if (ok && mc_->jointHierarchy[root_bvh_jid_].hasPositionalChannels &&
+        p.frame_count > 0)
+    {
+        unsigned int xi = bvh_resolveFrameAndJointAndChannelToMotionID(
+                              mc_, (BVHJointID)root_bvh_jid_, 0, BVH_POSITION_X);
+        unsigned int yi = bvh_resolveFrameAndJointAndChannelToMotionID(
+                              mc_, (BVHJointID)root_bvh_jid_, 0, BVH_POSITION_Y);
+        unsigned int zi = bvh_resolveFrameAndJointAndChannelToMotionID(
+                              mc_, (BVHJointID)root_bvh_jid_, 0, BVH_POSITION_Z);
+        // The resolve helper returns ABSOLUTE indices assuming fID=0;
+        // since each row is one frame's data, fID=0 makes the result
+        // also the in-row offset.
+        float mn[3] = {  std::numeric_limits<float>::infinity(),
+                          std::numeric_limits<float>::infinity(),
+                          std::numeric_limits<float>::infinity() };
+        float mx[3] = { -std::numeric_limits<float>::infinity(),
+                         -std::numeric_limits<float>::infinity(),
+                         -std::numeric_limits<float>::infinity() };
+        const unsigned int ch_idx[3] = { xi, yi, zi };
+        for (int f = 0; f < p.frame_count; ++f)
+        {
+            const float* row = mut.motion.data() + (size_t)f * total_channels_;
+            for (int a = 0; a < 3; ++a) {
+                float v = row[ch_idx[a]];
+                if (v < mn[a]) mn[a] = v;
+                if (v > mx[a]) mx[a] = v;
+            }
+        }
+        printf("[BVHWriter] person %d: root path  "
+               "X=[%.1f, %.1f] cm  Y=[%.1f, %.1f] cm  Z=[%.1f, %.1f] cm\n",
+               p.id, mn[0], mx[0], mn[1], mx[1], mn[2], mx[2]);
+
+        constexpr float BVHTESTER_HALF_VOL_CM = 200.0f;
+        bool out = false;
+        for (int a = 0; a < 3; ++a)
+            if (mn[a] < -BVHTESTER_HALF_VOL_CM || mx[a] > BVHTESTER_HALF_VOL_CM) {
+                out = true;
+                break;
+            }
+        if (out) {
+            // Pick a sane override position for the suggestion: keep the
+            // observed X/Y centres, push Z to 1500 (= -150 cm in BVHTester's
+            // negate-and-divide-by-10 convention, the same depth MocapNET
+            // scripts use).
+            int cx = (int)((mn[0] + mx[0]) * 0.5f * -10.0f);
+            int cy = (int)((mn[1] + mx[1]) * 0.5f * -10.0f);
+            fprintf(stderr,
+                "[BVHWriter] person %d: root path falls outside BVHTester's default\n"
+                "                ±%.0f-cm visible volume — the file plays correctly in\n"
+                "                Blender but BVHTester will render an empty scene.\n"
+                "                To preview in BVHTester:\n"
+                "                  BVHTester --from %s \\\n"
+                "                            --setPositionRotation %d %d 1500 0 0 0 \\\n"
+                "                            --csv ./ %s 3d\n",
+                p.id, BVHTESTER_HALF_VOL_CM, path.c_str(), cx, cy, "test");
+        }
+    }
+
     // Restore offsets for the next person.
     for (int j = 0; j < N; ++j)
     {

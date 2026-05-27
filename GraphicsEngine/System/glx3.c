@@ -4,8 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>          /* sig_atomic_t */
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/Xatom.h>
 
 
 
@@ -35,6 +37,19 @@ Display   *display;
 Window     win;
 GLXContext ctx = 0;
 Colormap cmap;
+
+/* Clean-shutdown plumbing.  WM_DELETE_WINDOW is the X11 protocol for "user
+ * clicked the close button" — without registering for it, the WM kills the
+ * X connection on close, which historically meant our process was killed
+ * mid-frame (truncated mp4 output, half-written BVH, no encoder hand-off).
+ * We register, catch the corresponding ClientMessage in glx3_checkEvents(),
+ * and turn it into a clean shutdown via the close flag below.
+ *
+ * The flag is also exposed via glx3_request_close() so non-X paths
+ * (Escape key, end-of-video, BVH writer aborts, future signal handlers)
+ * can ask for the same clean exit. */
+static Atom wm_delete_window = 0;
+static volatile sig_atomic_t close_requested = 0;
 
 
 #define NORMAL   "\033[0m"
@@ -240,6 +255,15 @@ int start_glx3_stuffWindowed(int WIDTH,int HEIGHT,int argc,const char **argv)
     XFree( vi );
 
     XStoreName( display, win, "SAM3DBody-cpp OpenGL3.x+ Visualization" );
+
+    /* Subscribe to WM_DELETE_WINDOW so the close button delivers a
+     * ClientMessage we can intercept instead of having the WM cut our X
+     * connection (which would terminate the process at whatever the next
+     * X call happened to be — historically: somewhere in the middle of a
+     * frame, taking the truncated-mp4 issue with it). */
+    wm_delete_window = XInternAtom( display, "WM_DELETE_WINDOW", False );
+    if ( wm_delete_window != None )
+        XSetWMProtocols( display, win, &wm_delete_window, 1 );
 
     printf( "Mapping window\n" );
     XMapWindow( display, win );
@@ -605,31 +629,48 @@ int glx3_endRedraw()
 }
 
 
+int glx3_should_close()
+{
+    return close_requested ? 1 : 0;
+}
+
+void glx3_request_close()
+{
+    close_requested = 1;
+}
+
 int glx3_checkEvents()
 {
-    //GLboolean            needRedraw = GL_FALSE, recalcModelView = GL_TRUE;
-    XEvent  event;
-    while(XPending(display))
+    /* Pbuffer / headless mode has no X event source (no window was mapped),
+     * so XPending would be polling forever for events that can't arrive.
+     * Just honour any close request and return. */
+    if (glx3_is_pbuffer) return close_requested ? 0 : 1;
+
+    /* If something already asked for a clean shutdown (Escape, ClientMessage
+     * on a previous tick, an external call to glx3_request_close()), stop
+     * pumping — the render loop's `while (glx3_checkEvents())` will exit. */
+    if (close_requested) return 0;
+
+    XEvent event;
+    while (XPending(display))
     {
         XNextEvent(display, &event);
         switch (event.type)
         {
         case KeyPress:
         {
-            KeySym     keysym;
-            //XKeyEvent *kevent;
-            char       buffer[1];
-            // It is necessary to convert the keycode to a
-            // keysym before checking if it is an escape */
-            //kevent = (XKeyEvent *) &event;
-            if (   (XLookupString((XKeyEvent *)&event,buffer,1,&keysym,NULL) == 1)
-                    && (keysym == (KeySym)XK_Escape) )
-                exit(0);
-
-
-            handleUserInput(keysym,1,0,0);
-
-
+            KeySym keysym;
+            char   buffer[1];
+            int n = XLookupString((XKeyEvent*)&event, buffer, 1, &keysym, NULL);
+            if (n == 1 && keysym == (KeySym)XK_Escape) {
+                /* Escape used to be `exit(0)`, which skipped every dtor /
+                 * fclose / dumpBVH the rest of the program had queued.  Now
+                 * it asks for a clean shutdown so the main loop drops out
+                 * and post-loop cleanup runs to completion. */
+                glx3_request_close();
+                return 0;
+            }
+            handleUserInput(keysym, 1, 0, 0);
             break;
         }
         case ButtonRelease:
@@ -637,32 +678,51 @@ int glx3_checkEvents()
             switch (event.xbutton.button)
             {
             case 1:
-                handleUserInput(1,(event.type==ButtonPress),event.xmotion.x_root,event.xmotion.y_root);
+                handleUserInput(1, (event.type == ButtonPress),
+                                event.xmotion.x_root, event.xmotion.y_root);
                 break;
             case 2:
-                handleUserInput(2,(event.type==ButtonPress),event.xmotion.x_root,event.xmotion.y_root);
+                handleUserInput(2, (event.type == ButtonPress),
+                                event.xmotion.x_root, event.xmotion.y_root);
                 break;
             case 3:
-                handleUserInput(3,(event.type==ButtonPress),event.xmotion.x_root,event.xmotion.y_root);
+                handleUserInput(3, (event.type == ButtonPress),
+                                event.xmotion.x_root, event.xmotion.y_root);
                 break;
             }
             break;
         case ConfigureNotify:
-            //glViewport(0, 0, event.xconfigure.width, event.xconfigure.height);
-            fprintf(stderr,"Received window configuration event..\n");
+            fprintf(stderr, "Received window configuration event..\n");
             windowSizeUpdated(event.xconfigure.width, event.xconfigure.height);
-        /* fall through... */
+            /* fall through */
         case Expose:
-            //#warning "redraws are not handled ?"
-            // needRedraw=GL_TRUE;
             break;
+        case ClientMessage:
+            /* The window-manager close button arrives here when we've
+             * registered for WM_DELETE_WINDOW (we did, just after creating
+             * the window).  Without this case, the WM kills the X
+             * connection on close and the next X call we make blows up
+             * the process — which is exactly the "long render dies in
+             * obscure X11 ways" failure mode the PLAN.md called out. */
+            if (wm_delete_window != None &&
+                (Atom)event.xclient.data.l[0] == wm_delete_window)
+            {
+                fprintf(stderr, "Received WM_DELETE_WINDOW — requesting clean shutdown\n");
+                glx3_request_close();
+                return 0;
+            }
+            break;
+        case DestroyNotify:
+            /* The window died from under us anyway (WM ignored the protocol,
+             * or someone xkill'd us).  Treat as a close request so the loop
+             * exits before we issue another X call on a dead window. */
+            fprintf(stderr, "Received DestroyNotify — requesting clean shutdown\n");
+            glx3_request_close();
+            return 0;
         }
-    }; /* loop to compress events */
+    }
 
-
-    return 1;
-
-    return 0;
+    return close_requested ? 0 : 1;
 }
 
 

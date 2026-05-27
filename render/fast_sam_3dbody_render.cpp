@@ -206,36 +206,127 @@ static BgTex create_bg_tex()
 }
 
 // Upload a BGR frame. Converts to RGB so the sampler returns correct colours.
-static void upload_bg_frame(BgTex& t, const cv::Mat& bgr)
+//
+// Returns true on success, false if the upload could not be completed.  The
+// caller should skip the GL pass for this frame on failure rather than crash
+// — the renderer is otherwise long-lived and a single bad frame shouldn't
+// take it down.
+//
+// Defensively guards against every path that's been observed (or is
+// plausibly causing) the segfault that the previous inline comment flagged:
+//
+//   * Texture object never allocated (`t.id == 0`) — glTexImage2D into 0
+//     is undefined behaviour on some drivers (intel-mesa segfaults, nvidia
+//     silently writes nowhere).
+//   * Input cv::Mat empty / null / wrong type.  `frame.clone()` upstream
+//     can return an empty Mat under OpenCV OOM; the previous code's
+//     `vis.empty()` check happened *after* `cvtColor` would have crashed.
+//   * Non-3-channel input (e.g. greyscale fallback when the decoder
+//     produces YUV420 and OpenCV converts to single-channel by mistake).
+//   * Pathological dimensions (negative, zero, or > MAX_TEXTURE_SIZE
+//     equivalent).  glTexImage2D with width/height beyond the GL
+//     implementation's max gives GL_INVALID_VALUE — and on a few drivers
+//     pre-write checks dereference an oversized row pointer first.
+//   * Non-contiguous cv::Mat (`!isContinuous()`).  After cvtColor this
+//     almost never happens but cvtColor on a sub-region of a larger Mat
+//     can produce one; glTexImage2D reads the buffer as a flat
+//     width*height*3 byte stream and would walk off the end of a strided
+//     buffer.
+//   * cv::cvtColor itself throwing.  Wrap in try/catch and return false
+//     rather than letting the exception kill the process.
+//   * Stale GL errors from earlier in the frame masking ours — drain
+//     them before our own checks so we can correlate any error we see
+//     here with one of our own calls.
+static bool upload_bg_frame(BgTex& t, const cv::Mat& bgr)
 {
-    cv::Mat rgb;
-    cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
-    if (rgb.empty() || rgb.data == nullptr) {
-        fprintf(stderr, "[CV] upload_bg_frame: empty or null RGB image (%dx%d)\n", bgr.cols, bgr.rows);
-        return;
+    if (t.id == 0) {
+        fprintf(stderr, "[GL] upload_bg_frame: texture not allocated (id=0)\n");
+        return false;
+    }
+    if (bgr.empty() || bgr.data == nullptr) {
+        fprintf(stderr, "[CV] upload_bg_frame: empty/null input Mat\n");
+        return false;
+    }
+    if (bgr.type() != CV_8UC3) {
+        fprintf(stderr, "[CV] upload_bg_frame: wrong type %d (need CV_8UC3=%d) — "
+                        "%dx%d, channels=%d\n",
+                bgr.type(), CV_8UC3, bgr.cols, bgr.rows, bgr.channels());
+        return false;
+    }
+    if (bgr.cols <= 0 || bgr.rows <= 0 ||
+        bgr.cols > 16384 || bgr.rows > 16384) {
+        // 16384 is GL_MAX_TEXTURE_SIZE on every desktop GPU made since ~2010;
+        // anything beyond is either a decoded-frame corruption or an HDR
+        // 8K+ source we wouldn't want to render anyway.
+        fprintf(stderr, "[CV] upload_bg_frame: bad dimensions %dx%d\n",
+                bgr.cols, bgr.rows);
+        return false;
     }
 
-    // Enforce 1-byte unpack alignment — OpenCV data is tightly packed and
-    // may not satisfy GL_UNPACK_ALIGNMENT=4, causing glTexImage2D to read
-    // past the buffer end on rows where cols*3 % 4 != 0.
-    GLint old_unpack;
+    cv::Mat rgb;
+    try {
+        cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
+    } catch (const cv::Exception& e) {
+        fprintf(stderr, "[CV] upload_bg_frame: cvtColor threw: %s\n", e.what());
+        return false;
+    }
+    if (rgb.empty() || rgb.data == nullptr || rgb.type() != CV_8UC3) {
+        fprintf(stderr, "[CV] upload_bg_frame: cvtColor produced bad Mat "
+                        "(empty=%d data=%p type=%d)\n",
+                rgb.empty(), (void*)rgb.data, rgb.type());
+        return false;
+    }
+    // glTexImage2D treats the pixel buffer as a flat (width*height*3) byte
+    // stream when GL_UNPACK_ROW_LENGTH=0; non-contiguous Mats have row
+    // padding that would make GL read past the end of valid memory.
+    // Cheap and safe to force-pack.
+    if (!rgb.isContinuous()) rgb = rgb.clone();
+
+    // Drain any prior GL errors so our error checks below can be trusted.
+    while (glGetError() != GL_NO_ERROR) { /* discard */ }
+
+    GLint old_unpack = 4;
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &old_unpack);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
+    bool ok = true;
     glBindTexture(GL_TEXTURE_2D, t.id);
-    if (!t.ready || bgr.cols != t.w || bgr.rows != t.h) {
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        fprintf(stderr, "[GL] glBindTexture(id=%u) failed: 0x%04X\n", t.id, err);
+        ok = false;
+    } else if (!t.ready || rgb.cols != t.w || rgb.rows != t.h) {
+        // Dimensions changed (or first upload) — allocate storage.
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                     bgr.cols, bgr.rows, 0,
+                     rgb.cols, rgb.rows, 0,
                      GL_RGB, GL_UNSIGNED_BYTE, rgb.data);
-        t.w = bgr.cols; t.h = bgr.rows; t.ready = true;
+        err = glGetError();
+        if (err != GL_NO_ERROR) {
+            fprintf(stderr, "[GL] glTexImage2D %dx%d failed: 0x%04X\n",
+                    rgb.cols, rgb.rows, err);
+            // Mark texture invalid so we don't try to glTexSubImage2D into
+            // it next frame (which would silently corrupt the display).
+            t.ready = false;
+            t.w = t.h = 0;
+            ok = false;
+        } else {
+            t.w = rgb.cols; t.h = rgb.rows; t.ready = true;
+        }
     } else {
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-                        bgr.cols, bgr.rows,
+                        rgb.cols, rgb.rows,
                         GL_RGB, GL_UNSIGNED_BYTE, rgb.data);
+        err = glGetError();
+        if (err != GL_NO_ERROR) {
+            fprintf(stderr, "[GL] glTexSubImage2D %dx%d failed: 0x%04X\n",
+                    rgb.cols, rgb.rows, err);
+            ok = false;
+        }
     }
 
     glBindTexture(GL_TEXTURE_2D, 0);
     glPixelStorei(GL_UNPACK_ALIGNMENT, old_unpack);
+    return ok;
 }
 
 // ── 4x4 matrix multiply (column-major) ──────────────────────────────────────
@@ -351,72 +442,23 @@ static void save_framebuffer(const std::string& path, int w, int h) {
     printf("Saved: %s\n", path.c_str());
 }
 
-// ── 2nd-order Butterworth low-pass filter (Direct Form II transposed) ────────
-// Default coefficients: fc=2 Hz at 30 fps
-//   b = [0.02008, 0.04016, 0.02008], a = [1, -1.56102, 0.64135]
-struct BwFilter {
-    // Coefficients default to ~1.5 Hz at 30 fps; call init() to override.
-    float b0 = 0.02008f, b1 = 0.04016f, b2 = 0.02008f;
-    float a1 = -1.56102f, a2 = 0.64135f;
-    bool  active = true;   // false when fc >= fs/2 (Nyquist): filter becomes a pass-through
-    std::vector<float> s1, s2, prev_x, acc;
-    bool ready = false;
-
-    // Compute 2nd-order Butterworth coefficients for the given cutoff / sample rate.
-    // Group delay at DC ≈ 1/(π·fc) seconds — halving fc doubles the lag.
-    // fc must be < fs/2; above Nyquist the filter is disabled (pass-through).
-    void init(float fc, float fs) {
-        if (fc <= 0.f || fc >= fs * 0.5f) { active = false; return; }
-        active = true;
-        float ff  = fc / fs;
-        float ita = 1.f / tanf(3.14159265f * ff);
-        float q   = 1.41421356f;
-        b0  =  1.f / (1.f + q * ita + ita * ita);
-        b1  =  2.f * b0;
-        b2  =  b0;
-        // Stored negated to match the transposed-direct-form-II sign convention used in apply().
-        a1  = -2.f * (ita * ita - 1.f) * b0;
-        a2  =  (1.f - q * ita + ita * ita) * b0;
-    }
-
-    void apply(float* data, int n) {
-        if (!active) return;
-        if ((int)s1.size() != n) {
-            s1.assign(n, 0.f); s2.assign(n, 0.f);
-            prev_x.assign(n, 0.f); acc.assign(n, 0.f);
-            ready = false;
-        }
-        if (!ready) {
-            // Warm-start: output equals first input (no transient).
-            // Initialise the unwrapped accumulator to the first raw value.
-            for (int i = 0; i < n; ++i) {
-                float x   = data[i];
-                acc[i]    = x;
-                prev_x[i] = x;
-                s1[i] = (1.f - b0) * x;
-                s2[i] = (b2 - a2)  * x;
-            }
-            ready = true;
-            return;
-        }
-        for (int i = 0; i < n; ++i) {
-            float x     = data[i];
-            // Wrap the per-frame delta to [-π, π] before accumulating so that
-            // Euler angle discontinuities (±π boundary crossings) don't cause the
-            // filter to interpolate through the discontinuity and produce a flip.
-            // For translation channels the delta is tiny (<< π) so wrapping is a no-op.
-            float delta = x - prev_x[i];
-            while (delta >  3.14159265f) delta -= 6.28318530f;
-            while (delta < -3.14159265f) delta += 6.28318530f;
-            acc[i]    += delta;
-            prev_x[i]  = x;
-            float y  = b0 * acc[i] + s1[i];
-            s1[i]    = b1 * acc[i] - a1 * y + s2[i];
-            s2[i]    = b2 * acc[i] - a2 * y;
-            data[i]  = y;
-        }
-    }
-};
+// 2nd-order Butterworth is now sourced from src/outputFiltering.h
+// (struct ButterWorth + initButterWorth/filter, plus the wrap-aware
+//  ButterWorthWrap shim that absorbs the unwrap-then-filter trick the
+//  previous BwFilter class did inline).  Removing the local duplicate
+//  eliminates the two-coefficient-conventions footgun PLAN.md called
+//  out — there's now exactly one Butterworth implementation in the
+//  project and any change to the smoothing math goes in one place.
+//
+// Helper: filter N channels in-place through a parallel bank of
+// ButterWorthWrap filters.  `bank.size()` must equal `n`.
+static inline void apply_bw_bank(std::vector<ButterWorthWrap>& bank,
+                                 float* data, int n)
+{
+    if ((int)bank.size() != n) return;
+    for (int i = 0; i < n; ++i)
+        data[i] = filter_wrap(&bank[i], data[i]);
+}
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
@@ -606,15 +648,34 @@ int main(int argc, const char** argv) {
             printf("[BVH] Writing to %s (%.1f fps)\n", bvh_path.c_str(), video_fps);
     }
 
-    // ── Butterworth filter state (one filter per channel group) ──────────────
-    BwFilter bw_mp;   // for mhr_model_params[204]
-    BwFilter bw_cam;  // for pred_cam_t[3]
+    // ── Butterworth filter banks ──────────────────────────────────────────────
+    //
+    // One ButterWorthWrap per channel.  wrap_input=1 on mhr_model_params is
+    // safe across the whole array — translation sub-ranges have per-frame
+    // deltas well under π so the wrap is a no-op there, while the Euler
+    // sub-ranges (joint rotations) get the wrap-correct integration that
+    // prevents ±π-discontinuity flips.  pred_cam_t is metres, no wrap
+    // possible, so wrap_input=0.
+    //
+    // Above-Nyquist cutoffs are caught here and disable the bank entirely
+    // (same Nyquist guard the old BwFilter::init had, just hoisted up).
+    std::vector<ButterWorthWrap> bw_mp;
+    std::vector<ButterWorthWrap> bw_cam;
+    bool bw_active = false;
     if (use_butterworth) {
-        bw_mp.init(bw_cutoff, video_fps);
-        bw_cam.init(bw_cutoff, video_fps);
-        float lag_ms = 1000.f / (3.14159f * bw_cutoff);
-        printf("[BW] cutoff=%.1f Hz  sample=%.1f Hz  approx lag=%.0f ms (%.1f frames)\n",
-               bw_cutoff, video_fps, lag_ms, lag_ms * video_fps / 1000.f);
+        if (bw_cutoff <= 0.f || bw_cutoff >= video_fps * 0.5f) {
+            printf("[BW] cutoff %.1f Hz is outside (0, Nyquist=%.1f Hz) — disabled\n",
+                   bw_cutoff, video_fps * 0.5f);
+        } else {
+            bw_active = true;
+            bw_mp.resize(204);
+            bw_cam.resize(3);
+            for (auto& w : bw_mp)  init_butterworth_wrap(&w, video_fps, bw_cutoff, 1);
+            for (auto& w : bw_cam) init_butterworth_wrap(&w, video_fps, bw_cutoff, 0);
+            float lag_ms = 1000.f / (3.14159f * bw_cutoff);
+            printf("[BW] cutoff=%.1f Hz  sample=%.1f Hz  approx lag=%.0f ms (%.1f frames)\n",
+                   bw_cutoff, video_fps, lag_ms, lag_ms * video_fps / 1000.f);
+        }
     }
     // global_rot quaternion 1st-order SLERP-EMA — same QuatLPF primitive as
     // fast_sam_3dbody_run.  Filter directly on orientation (no Euler-wrap or
@@ -677,10 +738,17 @@ int main(int argc, const char** argv) {
                                   lbs->hand_joint_idxs_right);
         }
 
-        // Temporal smoothing (Butterworth IIR)
+        // Temporal smoothing — scalar Butterworth on linear channels,
+        // QuatLPF SLERP-EMA on the root rotation.  The two gates are
+        // independent because QuatLPF doesn't have a Nyquist constraint:
+        // even if --bw-cutoff is above Nyquist (disabling bw_active), the
+        // user can still ask for --butterworth-root-rotation and get a
+        // working orientation filter.
         if (use_butterworth && !results.empty()) {
-            bw_mp.apply(results[0].mhr_model_params.data(), 204);
-            bw_cam.apply(results[0].pred_cam_t.data(), 3);
+            if (bw_active) {
+                apply_bw_bank(bw_mp,  results[0].mhr_model_params.data(), 204);
+                apply_bw_bank(bw_cam, results[0].pred_cam_t.data(),       3);
+            }
 
             // global_rot: quaternion-domain SLERP-EMA — only when
             // --butterworth-root-rotation is passed.  --rot-clamp is a
@@ -704,39 +772,35 @@ int main(int argc, const char** argv) {
         // Annotate frame: draw YOLO skeleton when LBS mesh is unavailable.
         cv::Mat vis = frame.clone();
         bool any_mesh = lbs && !results.empty();
-        if (!any_mesh) 
+        if (!any_mesh)
         {
             for (const auto& r : results)
                 draw_yolo_skeleton(vis, r.keypoints_yolo);
         }
 
-        // Upload background (with optional skeleton annotation)
-        if (!bg.ready)
-        {
-         fprintf(stderr, "[GL] error bg not ready\n");
-         exit(1);
-        }
-        
-        if ( (vis.empty()) )
-        {
-         fprintf(stderr, "[CV] error upload_bg_frame\n");
-         exit(1);
-        }
-        upload_bg_frame(bg, vis); //<-- THIS SEGFAULTS!
+        // Upload background.  Failures are non-fatal: skip the background
+        // quad for this frame and let the next frame retry.  Killing the
+        // process here is the regression that produced truncated mp4s
+        // (e.g. matrix_rendered.mp4 stopping at 14s with audio continuing
+        // for the full 90s) — a single bad frame should not take down a
+        // long render.
+        bool bg_ok = upload_bg_frame(bg, vis);
 
         glClearColor(0.f, 0.f, 0.f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glViewport(0, 0, W, H);
 
-        // ── Background quad ───────────────────────────────────────────────────
-        glDisable(GL_DEPTH_TEST);
-        glUseProgram(prog_quad);
-        glUniform1i(tex_loc, 0);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, bg.id);
-        glBindVertexArray(quad_vao);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-        glEnable(GL_DEPTH_TEST);
+        // ── Background quad (only when we have a valid texture) ──────────────
+        if (bg_ok && bg.ready) {
+            glDisable(GL_DEPTH_TEST);
+            glUseProgram(prog_quad);
+            glUniform1i(tex_loc, 0);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, bg.id);
+            glBindVertexArray(quad_vao);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            glEnable(GL_DEPTH_TEST);
+        }
 
         // ── Mesh overlay for each detected person ─────────────────────────────
         glUseProgram(prog_mesh);

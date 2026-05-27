@@ -614,14 +614,26 @@ smoother motion and more stable identities.
    detections are pruned at the end (default 8 — drops YOLO single-frame
    false positives).
 
-3. **Jitter interpolation** *(opt-in via `--interpolate-jitter`)* — flag
+3. **Gap interpolation** *(on by default; opt out with `--no-gap-interpolation`)*
+   — fill in any frame inside a track's lifespan that's missing a
+   detection by linear / SLERP-interpolating from the bracketing real
+   detections.  Without this, `BVHWriter` pads missing frames with
+   "duplicate last pose" and Blender sees that as a frozen segment for
+   the whole gap (typical cause: YOLO confidence dipped for a partial
+   occlusion, fast head turn, or low-contrast frame).  Scene cuts are
+   respected — we never bridge a cut.  `--gap-max-frames N` lets you
+   cap how long a gap will be filled; longer gaps revert to padding
+   (useful when the two endpoints are too different and the linear
+   morph looks unphysical).
+
+4. **Jitter interpolation** *(opt-in via `--interpolate-jitter`)* — flag
    frames whose 3D keypoint velocity exceeds `--jitter-threshold-cm`
    (default 30 cm/frame), then replace each flagged frame by a linear /
    SLERP interpolation of its non-flagged neighbours.  Scene cuts are
    respected — a "200 cm/frame velocity" right at a cut is real motion
    between shots, not noise, and we never bridge across a cut.
 
-4. **Zero-phase smoothing** — same Butterworth (for linear channels) and
+5. **Zero-phase smoothing** — same Butterworth (for linear channels) and
    QuatLPF (for `global_rot`) as the live binaries, but run as
    `filtfilt`: forward pass, reverse, forward pass, reverse.  The phase
    shift of the two passes cancels exactly, so the smoothed output has
@@ -629,7 +641,7 @@ smoother motion and more stable identities.
    segment is filtered independently — we never blend pose data from
    shot A into shot B.
 
-5. **BVH export** — feed the smoothed + interpolated detections, with
+6. **BVH export** — feed the smoothed + interpolated detections, with
    the globally-determined track IDs, into
    `BVHWriter::write_frame_external`.  The writer is exactly the one
    used by the live binaries; only the source of the IDs differs.
@@ -655,7 +667,9 @@ file with at least a handful of frames.
 | Flag | Default | Notes |
 |------|---------|-------|
 | `--smoothing zero-phase\|forward\|off` | `zero-phase` | Forward+backward `filtfilt` (no lag) vs the live binaries' forward-only filter vs no smoothing |
-| `--interpolate-jitter` | off | Enable Pass 3 |
+| `--no-gap-interpolation` | — | Disable Pass 3; missing frames inside a track will be padded with the last-known pose (the pre-fix "frozen segment" behaviour) |
+| `--gap-max-frames N` | `0` | Skip gap-fill for gaps longer than N frames (`0` = no limit).  Useful when long occlusions produce a visibly unphysical morph between two unrelated poses |
+| `--interpolate-jitter` | off | Enable Pass 4 |
 | `--jitter-threshold-cm CM` | `30.0` | Per-frame 3D-keypoint velocity above which a frame is replaced by an interpolation of its neighbours |
 | `--track-merge-frames N` | `30` | Maximum gap (in frames) for the post-hoc merge in Pass 2 |
 | `--track-merge-cm CM` | `50.0` | Maximum 3D root distance (cm) for the post-hoc merge |

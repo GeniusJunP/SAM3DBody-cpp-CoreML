@@ -320,4 +320,76 @@ static float filter(struct ButterWorth * sensor,float unfilteredValue)
     return out; 
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ *  ButterWorthWrap — 2nd-order Butterworth with an optional ±π wrap-correct
+ *                    pre-integrator for filtering Euler-angle channels.
+ *
+ *  The renderer used to carry a separate `BwFilter` class with this logic
+ *  baked in.  It produced output identical to running the scalar
+ *  ButterWorth above on a wrap-aware unwrapped accumulator, so we lift the
+ *  unwrap into a thin shim around the existing filter() rather than
+ *  duplicating coefficient math.
+ *
+ *  When wrap_input = 0:
+ *      Equivalent to filter(&w->bw, x).
+ *
+ *  When wrap_input = 1:
+ *      Track the previous input.  Each frame, compute (x − prev_in),
+ *      wrap it into [-π, π], add to a running accumulator, filter the
+ *      accumulator instead of the raw input.  Result is a smoothed
+ *      *unwrapped* Euler value (may exceed ±π) which preserves SO(3)
+ *      continuity through wraps.  Callers that need wrapped output can
+ *      remod themselves; most pipelines (BVH export, mhr_lbs_compute) are
+ *      perfectly fine with unwrapped Euler.
+ *
+ *  Use cases:
+ *      * Euler-channel batches like `mhr_model_params[204]` where some
+ *        sub-ranges are rotations and others are translations — the
+ *        wrap is a no-op for translations (their per-frame deltas are
+ *        << π), so wrap_input = 1 for the whole bank is safe.
+ *      * pred_cam_t / keypoints_3d, where wrap_input = 0 keeps the
+ *        filter strictly equivalent to the scalar ButterWorth path.
+ * ─────────────────────────────────────────────────────────────────────────── */
+struct ButterWorthWrap
+{
+    struct ButterWorth bw;
+    float acc;             /* unwrapped accumulator, valid only when wrap_input=1 */
+    float prev_in;         /* previous raw input, used to compute the wrapped delta */
+    char  wrap_input;      /* 0 = bypass unwrap; behave as a plain ButterWorth */
+    char  wrap_init;       /* 1 once acc/prev_in have been seeded to the first sample */
+};
+
+static void init_butterworth_wrap(struct ButterWorthWrap* w,
+                                  float fsampling, float fcutoff,
+                                  int wrap_input)
+{
+    initButterWorth(&w->bw, fsampling, fcutoff);
+    w->acc        = 0.f;
+    w->prev_in    = 0.f;
+    w->wrap_input = wrap_input ? 1 : 0;
+    w->wrap_init  = 0;
+}
+
+static float filter_wrap(struct ButterWorthWrap* w, float x)
+{
+    if (!w->wrap_input) return filter(&w->bw, x);
+
+    /* First sample: seed the unwrapped accumulator to the input.  Subsequent
+     * samples integrate wrapped deltas into it, which is mathematically
+     * identical to the renderer's old BwFilter::apply but routed through the
+     * shared scalar filter primitive. */
+    if (!w->wrap_init) {
+        w->acc       = x;
+        w->prev_in   = x;
+        w->wrap_init = 1;
+        return filter(&w->bw, x);   /* acc == x on the very first call */
+    }
+    float delta = x - w->prev_in;
+    while (delta >  3.14159265359f) delta -= 6.28318530718f;
+    while (delta < -3.14159265359f) delta += 6.28318530718f;
+    w->acc    += delta;
+    w->prev_in = x;
+    return filter(&w->bw, w->acc);
+}
+
 #endif

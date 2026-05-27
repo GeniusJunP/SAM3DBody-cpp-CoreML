@@ -32,10 +32,36 @@ int glx3_endRedraw();
 
 
 /**
-* @brief Check Window Events , keep window alive
+* @brief Pump pending X events.
+*
+* Returns 1 while the GL surface is still alive and the application should
+* keep its render loop going.  Returns 0 once a close has been requested —
+* either by the user clicking the window-manager's close button (which
+* delivers a `WM_DELETE_WINDOW` ClientMessage we now honour), pressing the
+* Escape key, or another call site invoking glx3_request_close().
+*
+* Render loops should be `while (glx3_checkEvents()) { ... }` so that the
+* close signal terminates the loop cleanly and the binary can run its
+* normal post-loop teardown (BVH close, mp4 encode, etc.) instead of being
+* hard-killed.
+*
 * @ingroup X11
-* @retval 1=Success , 0=Failure
+* @retval 1=keep running, 0=close requested
 */
 int glx3_checkEvents();
+
+/**
+* @brief Returns non-zero once a clean shutdown has been requested.
+* Independent of glx3_checkEvents() so non-X-event-driven loops (e.g. an
+* OOM handler, a timer, the BVH writer detecting end-of-video) can poll
+* it as well.
+*/
+int glx3_should_close();
+
+/**
+* @brief Programmatically request a clean shutdown.  Subsequent
+* glx3_checkEvents() / glx3_should_close() calls will return 0 / non-zero.
+*/
+void glx3_request_close();
 
 #endif // GLX2_H_INCLUDED
