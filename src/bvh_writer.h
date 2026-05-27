@@ -23,10 +23,17 @@ namespace fsb { struct MHRResult; }
 class BVHWriter
 {
 public:
+    // Public because the static NAME_MAP table in bvh_writer.cpp tags each entry
+    // with its kind, and the table lives in an anonymous namespace.
+    enum class SlotKind : char { Other, Body, Hand };
+
     bool open(const std::string& template_path,
               const std::string& out_path,
               float              frame_time = 1.0f / 30.0f,
-              const std::string& lbs_path   = "");
+              const std::string& lbs_path   = "",
+              bool               rewrite_body_offsets       = true,
+              bool               rewrite_hand_offsets       = true,
+              bool               compensate_finger_endsites = true);
 
     void write_frame(const std::vector<fsb::MHRResult>& results);
     void close();
@@ -42,11 +49,12 @@ public:
 private:
     // ── Per-BVH-joint slot (resolved once for the template) ───────────────
     struct BvhSlot {
-        int  bvh_jid;
-        int  mhr_idx;             // -1 = unmapped
-        int  ancestor_bvh_jid;    // nearest mapped BVH ancestor (-1 = none)
-        int  ancestor_mhr_idx;
-        bool is_root;
+        int      bvh_jid;
+        int      mhr_idx;          // -1 = unmapped
+        int      ancestor_bvh_jid; // nearest mapped BVH ancestor (-1 = none)
+        int      ancestor_mhr_idx;
+        bool     is_root;
+        SlotKind kind = SlotKind::Other;
     };
 
     // ── Per-tracked-person state ──────────────────────────────────────────
@@ -73,6 +81,9 @@ private:
     int                total_channels_  = 0;
     float              frame_time_      = 1.0f / 30.0f;
     int                session_frames_  = 0;
+    bool               rewrite_body_offsets_       = true;
+    bool               rewrite_hand_offsets_       = true;
+    bool               compensate_finger_endsites_ = true;
 
     std::vector<BvhSlot> slots_;             // shared template
     int                  root_bvh_jid_ = -1;

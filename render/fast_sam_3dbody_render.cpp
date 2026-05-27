@@ -430,6 +430,9 @@ int main(int argc, const char** argv) {
     int         save_frame_idx     = 0;
     std::string bvh_path           = "";
     std::string bvh_template       = "";
+    bool        bvh_body_shape_change          = true;
+    bool        bvh_hand_shape_change          = true;
+    bool        bvh_compensate_finger_endsites = true;
     bool        use_butterworth    = false;
     float       bw_cutoff         = 6.0f;   // Hz; higher = less lag, less smoothing
     bool        filter_root_rot   = false;  // enabled by --butterworth-root-rotation
@@ -471,6 +474,9 @@ int main(int argc, const char** argv) {
         if (!strcmp(argv[i], "--butterworth"))              { use_butterworth  = true; continue; }
         if (!strcmp(argv[i], "--butterworth-root-rotation")){ filter_root_rot  = true; continue; }
         if (!strcmp(argv[i], "--rot-clamp") && i+1 < argc) { rot_clamp_deg = std::stof(argv[++i]); continue; }
+        if (!strcmp(argv[i], "--no-bvh-body-shape-change")) { bvh_body_shape_change = false; continue; }
+        if (!strcmp(argv[i], "--no-bvh-hand-shape-change")) { bvh_hand_shape_change = false; continue; }
+        if (!strcmp(argv[i], "--bvh-raw-fingers"))          { bvh_compensate_finger_endsites = false; continue; }
     }
 
     // ── Pipeline ─────────────────────────────────────────────────────────────
@@ -574,7 +580,9 @@ int main(int argc, const char** argv) {
     BVHWriter bvh_writer;
     if (!bvh_path.empty()) {
         if (bvh_template.empty()) bvh_template = "./body.bvh";
-        if (!bvh_writer.open(bvh_template, bvh_path, 1.f / video_fps, lbs_path))
+        if (!bvh_writer.open(bvh_template, bvh_path, 1.f / video_fps, lbs_path,
+                             bvh_body_shape_change, bvh_hand_shape_change,
+                             bvh_compensate_finger_endsites))
             fprintf(stderr, "[BVH] Warning: could not open BVH writer\n");
         else
             printf("[BVH] Writing to %s (%.1f fps)\n", bvh_path.c_str(), video_fps);

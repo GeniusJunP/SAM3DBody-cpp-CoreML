@@ -147,34 +147,38 @@ struct NameMap
 {
     const char* bvh;
     const char* mhr;
+    BVHWriter::SlotKind kind;
 };
+constexpr BVHWriter::SlotKind BODY = BVHWriter::SlotKind::Body;
+constexpr BVHWriter::SlotKind HAND = BVHWriter::SlotKind::Hand;
+
 constexpr NameMap NAME_MAP[] =
 {
-    { "hip","root" }, { "abdomen","c_spine1" }, { "chest","c_spine3" },
-    { "neck","c_neck" }, { "head","c_head" }, { "jaw","c_jaw" },
+    { "hip","root",BODY }, { "abdomen","c_spine1",BODY }, { "chest","c_spine3",BODY },
+    { "neck","c_neck",BODY }, { "head","c_head",BODY }, { "jaw","c_jaw",BODY },
 
-    { "lCollar","l_clavicle" }, { "lShldr","l_uparm" },
-    { "lForeArm","l_lowarm" }, { "lHand","l_wrist" },
+    { "lCollar","l_clavicle",BODY }, { "lShldr","l_uparm",BODY },
+    { "lForeArm","l_lowarm",BODY }, { "lHand","l_wrist",BODY },
 
-    { "rCollar","r_clavicle" }, { "rShldr","r_uparm" },
-    { "rForeArm","r_lowarm" }, { "rHand","r_wrist" },
+    { "rCollar","r_clavicle",BODY }, { "rShldr","r_uparm",BODY },
+    { "rForeArm","r_lowarm",BODY }, { "rHand","r_wrist",BODY },
 
-    { "lThigh","l_upleg" }, { "lShin","l_lowleg" }, { "lFoot","l_foot" },
-    { "rThigh","r_upleg" }, { "rShin","r_lowleg" }, { "rFoot","r_foot" },
+    { "lThigh","l_upleg",BODY }, { "lShin","l_lowleg",BODY }, { "lFoot","l_foot",BODY },
+    { "rThigh","r_upleg",BODY }, { "rShin","r_lowleg",BODY }, { "rFoot","r_foot",BODY },
 
     // Left hand fingers (BVH finger2..5 = index/middle/ring/pinky; finger1 = thumb).
-    { "lthumb",      "l_thumb1" }, { "finger1-2.l","l_thumb2" }, { "finger1-3.l","l_thumb3" },
-    { "finger2-1.l","l_index1" }, { "finger2-2.l","l_index2" }, { "finger2-3.l","l_index3" },
-    { "finger3-1.l","l_middle1"}, { "finger3-2.l","l_middle2"}, { "finger3-3.l","l_middle3"},
-    { "finger4-1.l","l_ring1"  }, { "finger4-2.l","l_ring2"  }, { "finger4-3.l","l_ring3"  },
-    { "finger5-1.l","l_pinky1" }, { "finger5-2.l","l_pinky2" }, { "finger5-3.l","l_pinky3" },
+    { "lthumb",      "l_thumb1",HAND }, { "finger1-2.l","l_thumb2",HAND }, { "finger1-3.l","l_thumb3",HAND },
+    { "finger2-1.l","l_index1",HAND }, { "finger2-2.l","l_index2",HAND }, { "finger2-3.l","l_index3",HAND },
+    { "finger3-1.l","l_middle1",HAND}, { "finger3-2.l","l_middle2",HAND}, { "finger3-3.l","l_middle3",HAND},
+    { "finger4-1.l","l_ring1",HAND  }, { "finger4-2.l","l_ring2",HAND  }, { "finger4-3.l","l_ring3",HAND  },
+    { "finger5-1.l","l_pinky1",HAND }, { "finger5-2.l","l_pinky2",HAND }, { "finger5-3.l","l_pinky3",HAND },
 
     // Right hand fingers
-    { "rthumb",      "r_thumb1" }, { "finger1-2.r","r_thumb2" }, { "finger1-3.r","r_thumb3" },
-    { "finger2-1.r","r_index1" }, { "finger2-2.r","r_index2" }, { "finger2-3.r","r_index3" },
-    { "finger3-1.r","r_middle1"}, { "finger3-2.r","r_middle2"}, { "finger3-3.r","r_middle3"},
-    { "finger4-1.r","r_ring1"  }, { "finger4-2.r","r_ring2"  }, { "finger4-3.r","r_ring3"  },
-    { "finger5-1.r","r_pinky1" }, { "finger5-2.r","r_pinky2" }, { "finger5-3.r","r_pinky3" },
+    { "rthumb",      "r_thumb1",HAND }, { "finger1-2.r","r_thumb2",HAND }, { "finger1-3.r","r_thumb3",HAND },
+    { "finger2-1.r","r_index1",HAND }, { "finger2-2.r","r_index2",HAND }, { "finger2-3.r","r_index3",HAND },
+    { "finger3-1.r","r_middle1",HAND}, { "finger3-2.r","r_middle2",HAND}, { "finger3-3.r","r_middle3",HAND},
+    { "finger4-1.r","r_ring1",HAND  }, { "finger4-2.r","r_ring2",HAND  }, { "finger4-3.r","r_ring3",HAND  },
+    { "finger5-1.r","r_pinky1",HAND }, { "finger5-2.r","r_pinky2",HAND }, { "finger5-3.r","r_pinky3",HAND },
 };
 
 }  // namespace
@@ -315,6 +319,7 @@ bool BVHWriter::build_slots()
             continue;
         }
         slots_[bi->second].mhr_idx = mi->second;
+        slots_[bi->second].kind    = nm.kind;
         ++n_mapped;
     }
 
@@ -344,9 +349,15 @@ bool BVHWriter::build_slots()
 bool BVHWriter::open(const std::string& template_path,
                      const std::string& out_path,
                      float              frame_time,
-                     const std::string& lbs_path)
+                     const std::string& lbs_path,
+                     bool               rewrite_body_offsets,
+                     bool               rewrite_hand_offsets,
+                     bool               compensate_finger_endsites)
 {
-    out_path_ = out_path;
+    out_path_                    = out_path;
+    rewrite_body_offsets_        = rewrite_body_offsets;
+    rewrite_hand_offsets_        = rewrite_hand_offsets;
+    compensate_finger_endsites_  = compensate_finger_endsites;
 
     mc_ = (BVH_MotionCapture*)calloc(1, sizeof(*mc_));
     if (!mc_) return false;
@@ -682,11 +693,16 @@ void BVHWriter::rewrite_offsets_for(PerPerson& p)
     }
 
     int n_rewritten = 0;
+    int n_skipped   = 0;
     for (size_t i = 0; i < slots_.size(); ++i)
     {
         const BvhSlot& s = slots_[i];
         if (s.mhr_idx < 0 || s.is_root) continue;
         if (s.ancestor_bvh_jid < 0)     continue;
+        // Honour per-category disable flags — keeps the template's authored
+        // OFFSETs (T-pose proportions) for body or hand bones when requested.
+        if (s.kind == SlotKind::Body && !rewrite_body_offsets_) { ++n_skipped; continue; }
+        if (s.kind == SlotKind::Hand && !rewrite_hand_offsets_) { ++n_skipped; continue; }
         const auto& samples = p.bone_samples[i];
         size_t n = samples.size() / 3;
         if (n == 0) continue;
@@ -721,7 +737,64 @@ void BVHWriter::rewrite_offsets_for(PerPerson& p)
         ++n_rewritten;
     }
 
-    fprintf(stderr, "[BVHWriter] person %d: rewrote %d joint OFFSETs\n", p.id, n_rewritten);
+    fprintf(stderr,
+            "[BVHWriter] person %d: rewrote %d joint OFFSETs (skipped %d for "
+            "--no-bvh-{body,hand}-shape-change)\n",
+            p.id, n_rewritten, n_skipped);
+
+    // ── Fingertip End-Site compensation ─────────────────────────────────
+    // body.bvh's End-Site OFFSETs at finger tips tend to be 0.3–0.5 cm longer
+    // than the MHR `*_null` extensions, which makes the rewritten hands look
+    // slightly oversized even after the bone-length rewrite.  When this
+    // compensation is enabled (default; off with --bvh-raw-fingers), rescale
+    // each End-Site OFFSET on a Hand-tagged tip joint to the length of the
+    // corresponding MHR `*_null` joint's rest offset.  Direction is preserved.
+    if (compensate_finger_endsites_ && rewrite_hand_offsets_)
+    {
+        int n_endsite = 0;
+        for (size_t i = 0; i < slots_.size(); ++i)
+        {
+            const BvhSlot& s = slots_[i];
+            if (s.mhr_idx < 0 || s.kind != SlotKind::Hand) continue;
+
+            // Find an End-Site child of this BVH joint.
+            int es_jid = -1;
+            for (unsigned int k = 0; k < mc_->jointHierarchySize; ++k) {
+                if ((int)mc_->jointHierarchy[k].parentJoint == s.bvh_jid &&
+                    mc_->jointHierarchy[k].isEndSite) { es_jid = (int)k; break; }
+            }
+            if (es_jid < 0) continue;
+
+            // Find an MHR child whose name ends with "_null".
+            int null_idx = -1;
+            for (int k = 0; k < lbs_->n_joints; ++k) {
+                if (lbs_->joint_parents[k] != s.mhr_idx) continue;
+                const char* nm = mhr_joint_table::NAMES[k];
+                size_t L = strlen(nm);
+                if (L >= 5 && strcmp(nm + L - 5, "_null") == 0) { null_idx = k; break; }
+            }
+            if (null_idx < 0) continue;
+
+            const float* mhr_null_off = lbs_->joint_offsets + null_idx*3;
+            float target_len = std::sqrt(mhr_null_off[0]*mhr_null_off[0] +
+                                         mhr_null_off[1]*mhr_null_off[1] +
+                                         mhr_null_off[2]*mhr_null_off[2]);
+            if (target_len < 1e-3f) continue;
+
+            float* off = mc_->jointHierarchy[es_jid].offset;
+            float cur  = std::sqrt(off[0]*off[0] + off[1]*off[1] + off[2]*off[2]);
+            if (cur < 1e-3f) continue;
+            float scale = target_len / cur;
+            off[0] *= scale;
+            off[1] *= scale;
+            off[2] *= scale;
+            ++n_endsite;
+        }
+        if (n_endsite > 0)
+            fprintf(stderr,
+                    "[BVHWriter] person %d: rescaled %d finger End-Site OFFSETs "
+                    "(disable with --bvh-raw-fingers)\n", p.id, n_endsite);
+    }
 }
 
 // Build "<base>_<id>.<ext>".  If out_path_ has no extension, append .bvh.

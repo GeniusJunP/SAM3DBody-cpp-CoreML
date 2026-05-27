@@ -73,6 +73,9 @@ struct Config
     std::string csv_path    = "";    // if non-empty, write 3D joints to this CSV
     std::string bvh_path    = "";    // if non-empty, write BVH motion capture to this path
     std::string bvh_template = "./body.bvh"; // BVH skeleton template (hierarchy source)
+    bool        bvh_body_shape_change          = true;
+    bool        bvh_hand_shape_change          = true;
+    bool        bvh_compensate_finger_endsites = true;
     int         render_w    = 0;     // GL window width  (0 = match input)
     int         render_h    = 0;     // GL window height (0 = match input)
     int         cap_w       = 0;     // capture width  (0 = driver default)
@@ -102,8 +105,11 @@ static void print_usage(const char* prog)
     printf("  --cy F            Principal point y (0 = height/2)\n");
     printf("  --render-size W H GL window width and height in pixels (default: match input)\n");
     printf("  -o / --out PATH   Write 3D keypoints to CSV (frame,skeleton_id,joint_x,y,z...)\n");
-    printf("  --bvh PATH        Write BVH motion capture output to PATH\n");
+    printf("  --bvh PATH        Write BVH motion capture output to PATH (one file per tracked person)\n");
     printf("  --bvh-template P  BVH skeleton template (default ./body.bvh)\n");
+    printf("  --no-bvh-body-shape-change  Keep body.bvh's authored body bone lengths (no median rewrite)\n");
+    printf("  --no-bvh-hand-shape-change  Keep body.bvh's authored hand/finger bone lengths\n");
+    printf("  --bvh-raw-fingers           Do NOT rescale finger End-Site OFFSETs to MHR fingertip lengths\n");
     printf("  --headless        Do not open display windows\n");
     printf("  --info            Print pipeline info and exit\n");
     printf("  --butterworth              Apply Butterworth low-pass filter to MHR output vectors\n");
@@ -178,6 +184,21 @@ static Config parse_args(int argc, char** argv)
         if (!strcmp(argv[i], "--headless"))
         {
             c.headless  = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--no-bvh-body-shape-change"))
+        {
+            c.bvh_body_shape_change = false;
+            continue;
+        }
+        if (!strcmp(argv[i], "--no-bvh-hand-shape-change"))
+        {
+            c.bvh_hand_shape_change = false;
+            continue;
+        }
+        if (!strcmp(argv[i], "--bvh-raw-fingers"))
+        {
+            c.bvh_compensate_finger_endsites = false;
             continue;
         }
         if (!strcmp(argv[i], "--info"))
@@ -487,7 +508,10 @@ int main(int argc, char** argv)
 
         if (!bvh_writer.open(c.bvh_template, c.bvh_path,
                              1.0f / 30.0f,    // default 30 fps; TODO: derive from cap_fps
-                             lbs_path))
+                             lbs_path,
+                             c.bvh_body_shape_change,
+                             c.bvh_hand_shape_change,
+                             c.bvh_compensate_finger_endsites))
         {
             fprintf(stderr, "[main] BVH writer failed to open (continuing without BVH output).\n");
         }

@@ -219,6 +219,9 @@ Full option list:
 -o / --out PATH    Write 70-joint 3D keypoints to CSV per frame
 --bvh      PATH    Write BVH motion capture file(s) to PATH (see "BVH export" below)
 --bvh-template P   BVH skeleton template (default: ./body.bvh)
+--no-bvh-body-shape-change   Keep template body bone lengths (skip per-person rewrite)
+--no-bvh-hand-shape-change   Keep template hand/finger bone lengths (skip per-person rewrite)
+--bvh-raw-fingers            Do NOT rescale finger End-Site OFFSETs (keeps body.bvh's authored fingertips)
 --cuda     DEVICE  CUDA device index (default 0; -1 = CPU)
 --skip-body        Skip body model (no vertices / keypoints)
 --headless         No display window
@@ -391,6 +394,18 @@ For each detected person, every frame:
   length so the template T-pose proportions match the actual subject. Bone
   *direction* is preserved (changing it disrupts the T-pose look the BVH file
   was authored with).
+* **Per-category opt-out** with `--no-bvh-body-shape-change` and
+  `--no-bvh-hand-shape-change`. body.bvh's authored hands are shorter than the
+  MHR skeleton's (proximal phalanx 2.3 cm vs 3.8 cm), so rewriting visibly
+  *enlarges* fingers — pass `--no-bvh-hand-shape-change` to keep body.bvh's
+  authored hand proportions while still resizing the rest of the body to match
+  the subject. The body flag is the symmetric escape hatch for the trunk/limbs.
+* **Finger-tip End-Site compensation** (default on). The End-Site OFFSETs at
+  the end of each finger have no channels so the bone-length rewrite never
+  touches them, and body.bvh's are ~0.3 cm longer than the MHR `*_null` tip
+  extensions. By default we rescale all 10 finger End-Site OFFSETs to the
+  MHR length (direction preserved). Pass `--bvh-raw-fingers` to leave them
+  exactly as authored.
 
 ### Multi-person export
 
