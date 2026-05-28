@@ -26,3 +26,13 @@ static inline float fsb_half_to_float(uint16_t h)
     __builtin_memcpy(&out_f, &f, sizeof(out_f));
     return out_f;
 }
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void fsb_coreml_release_opaque(void* opaque);
+
+#ifdef __cplusplus
+}
+#endif
