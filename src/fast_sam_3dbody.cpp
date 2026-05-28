@@ -18,6 +18,7 @@
 #include "coreml_backbone.h"
 #include "coreml_yolo.h"
 #include "coreml_decoder.h"
+#include "coreml_utils.h"
 
 // ── ggml headers ─────────────────────────────────────────────────────────────
 #if __has_include(<ggml/ggml.h>)
@@ -750,9 +751,10 @@ struct Pipeline::Impl
         Ort::MemoryInfo mi = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
         std::vector<float> features(feat_elems);
+        std::vector<void*> opaque_features(B, nullptr);
         if (coreml_backbone.loaded())
         {
-            if (!coreml_backbone.run(batch_crops.data(), B, features.data()))
+            if (!coreml_backbone.run(batch_crops.data(), B, features.data(), opaque_features.data()))
                 return {};
         }
         else
@@ -787,7 +789,8 @@ struct Pipeline::Impl
                                         features.data() + i * BACKBONE_DIM * FEAT_HW * FEAT_HW,
                                         batch_cond.data() + i * 3,
                                         batch_ray.data() + i * 2 * FEAT_HW * FEAT_HW,
-                                        pose_tokens.data() + i * DECODER_DIM))
+                                        pose_tokens.data() + i * DECODER_DIM,
+                                        opaque_features[i]))
                 {
                     fprintf(stderr, "[FSB] CoreML Decoder inference failed for person %d\n", i);
                 }
@@ -817,6 +820,14 @@ struct Pipeline::Impl
             const float* token_ptr = decoder_out[0].GetTensorData<float>();
             std::copy(token_ptr, token_ptr + token_elems, pose_tokens.begin());
         }
+
+        // Clean up CoreML opaque pointers
+        for (int i = 0; i < B; ++i) {
+            if (opaque_features[i]) {
+                fsb_coreml_release_opaque(opaque_features[i]);
+            }
+        }
+
         printf("[FSB] decoder:    %.1f ms\n", ms(t0));
 
         // ── MHR head (CPU FFN) ────────────────────────────────────────────────
