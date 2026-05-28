@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <CoreML/CoreML.h>
 #include "coreml_yolo.h"
+#include "coreml_utils.h"
 #include <iostream>
 #include <vector>
 
