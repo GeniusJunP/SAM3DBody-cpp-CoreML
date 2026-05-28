@@ -280,6 +280,15 @@ cd fast_sam_3dbody_cpp/build
 
 # CPU-only
 ./fast_sam_3dbody_run ... --cuda -1
+
+# macOS Apple Silicon (CoreML Acceleration)
+./fast_sam_3dbody_run \
+    --onnx-dir ../onnx \
+    --gguf ../onnx/pipeline.gguf \
+    --coreml-backbone ../coreml_export/backbone_coreml.mlmodelc \
+    --coreml-decoder ../coreml_export/decoder_coreml.mlmodelc \
+    --coreml-yolo ../coreml_export/yolo_coreml.mlmodelc \
+    --from 0
 ```
 
 Full option list:
@@ -288,6 +297,9 @@ Full option list:
 --onnx-dir PATH    Directory with backbone/decoder/body_model ONNX files
 --gguf     PATH    pipeline.gguf (MHR + camera heads)
 --yolo     PATH    YOLO pose model (.onnx)
+--coreml-backbone PATH  Native CoreML backbone .mlpackage or .mlmodelc (macOS)
+--coreml-yolo     PATH  Native CoreML YOLO .mlpackage or .mlmodelc (macOS)
+--coreml-decoder  PATH  Native CoreML decoder .mlpackage or .mlmodelc (macOS)
 --from     SRC     Webcam index (0,1,..) or path to image/video
 -o / --out PATH    Write 70-joint 3D keypoints to CSV per frame
 --bvh      PATH    Write BVH motion capture file(s) to PATH (see "BVH export" below)
