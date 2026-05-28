@@ -70,9 +70,9 @@ bool CoreMLBackbone::load(const std::string& mlpackage_path)
         NSString* path = [NSString stringWithUTF8String:mlpackage_path.c_str()];
         NSURL* url = [NSURL fileURLWithPath:path];
         MLModelConfiguration* config = [[MLModelConfiguration alloc] init];
-        const char* use_all = std::getenv("FSB_COREML_COMPUTE_ALL");
-        config.computeUnits = (use_all && use_all[0] == '1') ? MLComputeUnitsAll
-                                                             : MLComputeUnitsCPUAndGPU;
+        // The ViT backbone is known to exceed ANE limits (e.g. 1024x1024 global attention),
+        // causing fallback loops that severely degrade performance. Hardcoding CPU+GPU.
+        config.computeUnits = MLComputeUnitsCPUAndGPU;
 
         NSError* error = nil;
         NSURL* model_url = url;
@@ -154,36 +154,53 @@ bool CoreMLBackbone::run(const float* input_nchw, int batch, float* output_nchw)
             int St2 = strides.count > 2 ? strides[2].intValue : 0;
             int St3 = strides.count > 3 ? strides[3].intValue : 0;
 
-            if (features.dataType == MLMultiArrayDataTypeFloat32) {
-                const float* src = static_cast<const float*>(features.dataPointer);
-                for (int i0 = 0; i0 < S0; ++i0) {
-                    for (int i1 = 0; i1 < S1; ++i1) {
-                        for (int i2 = 0; i2 < S2; ++i2) {
-                            for (int i3 = 0; i3 < S3; ++i3) {
-                                int linear_idx = i0 * St0 + i1 * St1 + i2 * St2 + i3 * St3;
-                                int out_idx = i0 * (S1*S2*S3) + i1 * (S2*S3) + i2 * S3 + i3;
-                                dst[out_idx] = src[linear_idx];
-                            }
-                        }
+            bool is_contiguous = (St3 == 1 && St2 == S3 && St1 == S2 * S3 && St0 == S1 * S2 * S3);
+
+            if (is_contiguous) {
+                if (features.dataType == MLMultiArrayDataTypeFloat32) {
+                    std::memcpy(dst, features.dataPointer, output_elems * sizeof(float));
+                } else if (features.dataType == MLMultiArrayDataTypeFloat16) {
+                    const uint16_t* src = static_cast<const uint16_t*>(features.dataPointer);
+                    for (size_t i = 0; i < output_elems; ++i) {
+                        dst[i] = fsb_half_to_float(src[i]);
                     }
-                }
-            } else if (features.dataType == MLMultiArrayDataTypeFloat16) {
-                const uint16_t* src = static_cast<const uint16_t*>(features.dataPointer);
-                for (int i0 = 0; i0 < S0; ++i0) {
-                    for (int i1 = 0; i1 < S1; ++i1) {
-                        for (int i2 = 0; i2 < S2; ++i2) {
-                            for (int i3 = 0; i3 < S3; ++i3) {
-                                int linear_idx = i0 * St0 + i1 * St1 + i2 * St2 + i3 * St3;
-                                int out_idx = i0 * (S1*S2*S3) + i1 * (S2*S3) + i2 * S3 + i3;
-                                dst[out_idx] = fsb_half_to_float(src[linear_idx]);
-                            }
-                        }
-                    }
+                } else {
+                    std::fprintf(stderr, "[FSB] CoreML backbone returned unsupported dtype %ld.\n",
+                                 (long)features.dataType);
+                    return false;
                 }
             } else {
-                std::fprintf(stderr, "[FSB] CoreML backbone returned unsupported dtype %ld.\n",
-                             (long)features.dataType);
-                return false;
+                if (features.dataType == MLMultiArrayDataTypeFloat32) {
+                    const float* src = static_cast<const float*>(features.dataPointer);
+                    for (int i0 = 0; i0 < S0; ++i0) {
+                        for (int i1 = 0; i1 < S1; ++i1) {
+                            for (int i2 = 0; i2 < S2; ++i2) {
+                                for (int i3 = 0; i3 < S3; ++i3) {
+                                    int linear_idx = i0 * St0 + i1 * St1 + i2 * St2 + i3 * St3;
+                                    int out_idx = i0 * (S1*S2*S3) + i1 * (S2*S3) + i2 * S3 + i3;
+                                    dst[out_idx] = src[linear_idx];
+                                }
+                            }
+                        }
+                    }
+                } else if (features.dataType == MLMultiArrayDataTypeFloat16) {
+                    const uint16_t* src = static_cast<const uint16_t*>(features.dataPointer);
+                    for (int i0 = 0; i0 < S0; ++i0) {
+                        for (int i1 = 0; i1 < S1; ++i1) {
+                            for (int i2 = 0; i2 < S2; ++i2) {
+                                for (int i3 = 0; i3 < S3; ++i3) {
+                                    int linear_idx = i0 * St0 + i1 * St1 + i2 * St2 + i3 * St3;
+                                    int out_idx = i0 * (S1*S2*S3) + i1 * (S2*S3) + i2 * S3 + i3;
+                                    dst[out_idx] = fsb_half_to_float(src[linear_idx]);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    std::fprintf(stderr, "[FSB] CoreML backbone returned unsupported dtype %ld.\n",
+                                 (long)features.dataType);
+                    return false;
+                }
             }
         }
     }

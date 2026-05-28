@@ -618,18 +618,10 @@ struct Pipeline::Impl
             cv::resize(bgr, resized, {new_w, new_h}, 0, 0, cv::INTER_LINEAR);
             cv::Mat yolo_in(YH, YW, CV_8UC3, cv::Scalar(114, 114, 114));
             resized.copyTo(yolo_in(cv::Rect(pad_x, pad_y, new_w, new_h)));
-            // HWC uint8 → CHW float32 [0,1]
-            std::vector<float> yolo_buf(3 * YH * YW);
-            for (int y = 0; y < YH; ++y)
-            {
-                const uchar* row = yolo_in.ptr<uchar>(y);
-                for (int x = 0; x < YW; ++x)
-                {
-                    yolo_buf[0*YH*YW + y*YW + x] = row[3*x+2] / 255.f; // R
-                    yolo_buf[1*YH*YW + y*YW + x] = row[3*x+1] / 255.f; // G
-                    yolo_buf[2*YH*YW + y*YW + x] = row[3*x+0] / 255.f; // B
-                }
-            }
+            // HWC uint8 → CHW float32 [0,1], BGR → RGB
+            cv::Mat yolo_blob = cv::dnn::blobFromImage(yolo_in, 1.0/255.0, cv::Size(), cv::Scalar(), true, false);
+            // yolo_blob is continuous, size 1x3x640x640 float32
+            float* yolo_buf_ptr = yolo_blob.ptr<float>();
 
             int nd = 0;
             std::vector<float> row_major;
@@ -638,7 +630,7 @@ struct Pipeline::Impl
             {
                 nd = 8400;
                 row_major.resize(nd * 56);
-                if (!run_coreml_yolo(coreml_yolo, yolo_buf.data(), row_major.data()))
+                if (!run_coreml_yolo(coreml_yolo, yolo_buf_ptr, row_major.data()))
                 {
                     fprintf(stderr, "[FSB] CoreML YOLO inference failed\n");
                 }
@@ -648,7 +640,7 @@ struct Pipeline::Impl
                 Ort::MemoryInfo mi = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
                 std::vector<int64_t> in_shape{1, 3, YH, YW};
                 Ort::Value in_t = Ort::Value::CreateTensor<float>(
-                                      mi, yolo_buf.data(), yolo_buf.size(), in_shape.data(), 4);
+                                      mi, yolo_buf_ptr, 3 * YH * YW, in_shape.data(), 4);
 
                 try
                 {

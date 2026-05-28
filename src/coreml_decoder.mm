@@ -123,26 +123,44 @@ extern "C" bool run_coreml_decoder(CoreMLDecoderContext ctx_ptr,
         int St0 = strides.count > 0 ? strides[0].intValue : 0;
         int St1 = strides.count > 1 ? strides[1].intValue : 0;
 
-        if (mlOutput.dataType == MLMultiArrayDataTypeFloat32) {
-            float* outPtr = (float*)mlOutput.dataPointer;
-            for (int i = 0; i < S0; ++i) {
-                for (int j = 0; j < S1; ++j) {
-                    int linear_idx = i * St0 + j * St1;
-                    int out_idx = i * S1 + j;
-                    pose_token_out[out_idx] = outPtr[linear_idx];
+        bool is_contiguous = (St1 == 1 && St0 == S1);
+        int output_elems = S0 * S1;
+
+        if (is_contiguous) {
+            if (mlOutput.dataType == MLMultiArrayDataTypeFloat32) {
+                std::memcpy(pose_token_out, mlOutput.dataPointer, output_elems * sizeof(float));
+            } else if (mlOutput.dataType == MLMultiArrayDataTypeFloat16) {
+                const uint16_t* src = static_cast<const uint16_t*>(mlOutput.dataPointer);
+                for (size_t i = 0; i < output_elems; ++i) {
+                    pose_token_out[i] = fsb_half_to_float(src[i]);
                 }
+            } else {
+                std::cerr << "[CoreML Decoder] Unsupported output data type." << std::endl;
+                return false;
             }
-        } else if (mlOutput.dataType == MLMultiArrayDataTypeFloat16) {
-            uint16_t* outPtr = (uint16_t*)mlOutput.dataPointer;
-            for (int i = 0; i < S0; ++i) {
-                for (int j = 0; j < S1; ++j) {
-                    int linear_idx = i * St0 + j * St1;
-                    int out_idx = i * S1 + j;
-                    pose_token_out[out_idx] = fsb_half_to_float(outPtr[linear_idx]);
-                }
         } else {
-            std::cerr << "[CoreML Decoder] Unsupported output data type." << std::endl;
-            return false;
+            if (mlOutput.dataType == MLMultiArrayDataTypeFloat32) {
+                float* outPtr = (float*)mlOutput.dataPointer;
+                for (int i = 0; i < S0; ++i) {
+                    for (int j = 0; j < S1; ++j) {
+                        int linear_idx = i * St0 + j * St1;
+                        int out_idx = i * S1 + j;
+                        pose_token_out[out_idx] = outPtr[linear_idx];
+                    }
+                }
+            } else if (mlOutput.dataType == MLMultiArrayDataTypeFloat16) {
+                uint16_t* outPtr = (uint16_t*)mlOutput.dataPointer;
+                for (int i = 0; i < S0; ++i) {
+                    for (int j = 0; j < S1; ++j) {
+                        int linear_idx = i * St0 + j * St1;
+                        int out_idx = i * S1 + j;
+                        pose_token_out[out_idx] = fsb_half_to_float(outPtr[linear_idx]);
+                    }
+                }
+            } else {
+                std::cerr << "[CoreML Decoder] Unsupported output data type." << std::endl;
+                return false;
+            }
         }
 
         return true;
