@@ -4,6 +4,8 @@ Standalone C++ inference engine for **SAM-3D-Body** — zero Python dependency a
 
 Takes a BGR image and produces per-person MHR body pose parameters, camera translation, and optionally full 3D mesh vertices + 70 body/hand keypoints, all via ONNX Runtime + ggml.
 
+✨ **Apple Silicon Support**: Features a CoreML backend (`coreml_export/`) for macOS.
+
 Also includes Python frontends that call the compiled shared library via ctypes, and a CSV exporter for the 70 MHR keypoints.
 
 ### 🎬 Multi-person BVH motion-capture export
@@ -134,6 +136,8 @@ BGR image
       extracted once by tools/extract_lbs_data.py
 ```
 
+> **⚡ Apple Silicon (macOS) Acceleration**: On M1/M2/M3 Macs, YOLO, Backbone, and Decoder can be offloaded to GPU/ANE using native CoreML. See [`coreml_export/README.md`](coreml_export/README.md) for details.
+
 > **Note:** `body_model.onnx` export is blocked on PyTorch ≥ 2.x (torch.export rejects
 > TorchScript modules). The native C LBS path reads `body_model.lbs` directly and
 > produces identical output to Python `mhr_forward` (body model stores data in cm;
@@ -223,6 +227,14 @@ mkdir -p build && cd build
 
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
+```
+
+**For macOS (Apple Silicon + CoreML):**
+Use the `Makefile` in the root directory to automatically export ONNX models to CoreML and build the C++ project.
+```bash
+make models BACKBONE_SIZE=1024  # Export and compile .mlpackage
+make clean
+make BACKBONE_SIZE=1024         # Build fast_sam_3dbody_run with CoreML support
 ```
 
 CMake handles dependencies automatically:
@@ -841,6 +853,8 @@ fsb_destroy(h);
 | Decoder (6-layer) | ~20 ms |
 | MHR + camera FFN (CPU) | <1 ms |
 | Native C LBS (optional) | <1 ms |
+
+> **macOS (M1/M2/M3)**: With the CoreML backend, inference runs locally in **~2 seconds/frame** (1024x1024 resolution).
 
 - Backbone is the bottleneck; it dominates end-to-end latency.
 - Use `--skip-body` unless 3D vertices are required.
