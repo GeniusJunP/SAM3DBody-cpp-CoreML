@@ -23,6 +23,7 @@ venv/
 # Editor / IDE
 .vscode/
 .idea/
+.cache/
 *.swp
 *.swo
 .claude/
@@ -31,6 +32,8 @@ venv/
 error.txt
 *.valgrind.suppress
 screen*.jpg
+test_contiguous.cpp
+test.jpg
 
 # Test data (large media)
 scripts/*.avi
