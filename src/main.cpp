@@ -48,6 +48,11 @@ struct Config : public CommonConfig
     // Runner-specific output
     std::string csv_path;             // -o / --out
 
+    // CoreML paths
+    std::string coreml_backbone_path;
+    std::string coreml_yolo_path;
+    std::string coreml_decoder_path;
+
     // Runner-specific pipeline knobs
     bool        skip_body      = false;
     bool        zero_face      = true;
@@ -92,6 +97,7 @@ static void print_usage(const char* prog)
     printf("                    use backbone_int8.onnx after tools/quantize_backbone.py)\n");
     printf("  --gguf PATH       pipeline.gguf (MHR + camera heads)\n");
     printf("  --yolo PATH       YOLO pose model (.onnx or .engine)\n");
+    printf("  --coreml-backbone PATH  Native CoreML backbone .mlpackage (macOS)\n");
     printf("  --from SRC        Webcam index (0,1,..) or path to image/video\n");
     printf("  --size W H        Webcam capture resolution (default: driver default)\n");
     printf("  --fps Z           Webcam capture framerate  (default: driver default)\n");
@@ -133,7 +139,10 @@ static Config parse_args(int argc, char** argv)
 
 #define ARG1(flag, field, conv) \
         if (!strcmp(argv[i], flag) && i+1 < argc) { c.field = conv(argv[++i]); continue; }
-        // Runner-only: per-axis camera intrinsics + CSV path.
+        // Runner-only: per-axis camera intrinsics + CSV path + CoreML.
+        ARG1("--coreml-backbone", coreml_backbone_path, std::string)
+        ARG1("--coreml-yolo",     coreml_yolo_path,     std::string)
+        ARG1("--coreml-decoder",  coreml_decoder_path,  std::string)
         ARG1("--fx",       focal_x,     std::stof)
         ARG1("--fy",       focal_y,     std::stof)
         ARG1("--cx",       cx,          std::stof)
@@ -500,6 +509,12 @@ int main(int argc, char** argv)
 
     fsb::PipelineConfig pcfg;
     apply_common_to_pipeline_cfg(c, pcfg);  // all shared pipeline fields
+
+    // CoreML fields
+    pcfg.coreml_backbone_path = c.coreml_backbone_path;
+    pcfg.coreml_yolo_path = c.coreml_yolo_path;
+    pcfg.coreml_decoder_path = c.coreml_decoder_path;
+
     pcfg.skip_body_model  = c.skip_body;
     pcfg.zero_face_params = c.zero_face;
     pcfg.focal_x          = c.focal_x;

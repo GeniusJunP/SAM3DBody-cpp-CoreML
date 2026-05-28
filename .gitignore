@@ -15,6 +15,10 @@ __pycache__/
 *.egg-info/
 venv/
 .venv/
+*.gguf
+*.mlmodel
+*.mlmodelc
+*.mlpackage
 
 # Editor / IDE
 .vscode/
@@ -42,3 +46,25 @@ build/onnxruntime_dl/
 # Model files — distributed separately via HuggingFace
 onnx/
 SAM3DBody-cpp-onnx-models.zip
+.DS_Store
+
+# CoreML Export and macOS build artifacts
+build-coreml/
+coreml_export/backbone_coreml.mlpackage/
+coreml_export/backbone_coreml_compiled/
+coreml_export/checkpoints/
+coreml_export/facebook_sam_3d_body/
+coreml_export/fast_sam_3d_body/
+coreml_export/onnx_fp32/
+coreml_export/.venv/
+coreml_export/.venv311/
+coreml_export/*.log
+coreml_export/*.csv
+
+# Build and artifacts
+build-metal/
+AmMatrix/libAmMatrix.a
+coreml_export/*.mlpackage
+coreml_export/.venv*
+*.log
+

@@ -13,6 +13,11 @@
 
 #include "fast_sam_3dbody.h"
 #include "preprocess.hpp"
+#include "mhr_joint_table.h"
+#include "outputFiltering.h"
+#include "coreml_backbone.h"
+#include "coreml_yolo.h"
+#include "coreml_decoder.h"
 
 // ── ggml headers ─────────────────────────────────────────────────────────────
 #if __has_include(<ggml/ggml.h>)
@@ -319,6 +324,9 @@ struct Pipeline::Impl
     // ONNX Runtime
     Ort::Env        ort_env{ORT_LOGGING_LEVEL_WARNING, "fast_sam_3dbody"};
     OrtSession      sess_yolo, sess_backbone, sess_decoder, sess_body;
+    CoreMLBackbone  coreml_backbone;
+    CoreMLYoloContext    coreml_yolo    = nullptr;
+    CoreMLDecoderContext coreml_decoder = nullptr;
 
     // CPU FFNs for MHR + camera heads (weights loaded from GGUF)
     CFFN mhr_ffn, cam_ffn;
@@ -351,19 +359,41 @@ struct Pipeline::Impl
             return cfg.onnx_dir + "/" + f;
         };
 
-        printf("[FSB] Loading backbone … ");
-        fflush(stdout);
-        if (!sess_backbone.load(ort_env, opath(cfg.backbone_name.c_str()), cuda, dev,
-                                cfg.use_fp16, false))
-            return false;
-        printf("OK\n");
+        if (!cfg.coreml_backbone_path.empty())
+        {
+            printf("[FSB] Loading CoreML backbone … ");
+            fflush(stdout);
+            if (!coreml_backbone.load(cfg.coreml_backbone_path))
+                return false;
+            printf("OK\n");
+        }
+        else
+        {
+            printf("[FSB] Loading backbone … ");
+            fflush(stdout);
+            if (!sess_backbone.load(ort_env, opath(cfg.backbone_name.c_str()), cuda, dev,
+                                    cfg.use_fp16, false))
+                return false;
+            printf("OK\n");
+        }
 
-        printf("[FSB] Loading decoder  … ");
-        fflush(stdout);
-        if (!sess_decoder.load(ort_env, opath("decoder.onnx"), cuda, dev,
-                               cfg.use_fp16, false))
-            return false;
-        printf("OK\n");
+        if (!cfg.coreml_decoder_path.empty())
+        {
+            printf("[FSB] Loading CoreML decoder … ");
+            fflush(stdout);
+            coreml_decoder = init_coreml_decoder(cfg.coreml_decoder_path.c_str());
+            if (!coreml_decoder) return false;
+            printf("OK\n");
+        }
+        else
+        {
+            printf("[FSB] Loading decoder  … ");
+            fflush(stdout);
+            if (!sess_decoder.load(ort_env, opath("decoder.onnx"), cuda, dev,
+                                   cfg.use_fp16, false))
+                return false;
+            printf("OK\n");
+        }
 
         if (!cfg.skip_body_model)
         {
@@ -457,7 +487,21 @@ struct Pipeline::Impl
         }
 
         // YOLO – optional (might not exist for image-only usage)
-        if (!cfg.yolo_path.empty())
+        if (!cfg.coreml_yolo_path.empty())
+        {
+            printf("[FSB] Loading CoreML YOLO … ");
+            fflush(stdout);
+            coreml_yolo = init_coreml_yolo(cfg.coreml_yolo_path.c_str());
+            if (!coreml_yolo)
+            {
+                fprintf(stderr, "[FSB] CoreML YOLO load failed – detection disabled\n");
+            }
+            else
+            {
+                printf("OK\n");
+            }
+        }
+        else if (!cfg.yolo_path.empty())
         {
             printf("[FSB] Loading YOLO … ");
             fflush(stdout);
@@ -514,8 +558,9 @@ struct Pipeline::Impl
         }
         size_t data_base = gguf_get_data_offset(gctx);
 
-        bool ok = cffn_load(mhr_ffn, gctx, tmp_ctx, fp, data_base, "mhr_proj")
-                  && cffn_load(cam_ffn, gctx, tmp_ctx, fp, data_base, "cam_proj");
+        bool ok_mhr = cffn_load(mhr_ffn, gctx, tmp_ctx, fp, data_base, "mhr_proj");
+        bool ok_cam = ok_mhr && cffn_load(cam_ffn, gctx, tmp_ctx, fp, data_base, "cam_proj");
+        bool ok = ok_mhr && ok_cam;
 
         std::fclose(fp);
         gguf_free(gctx);
@@ -556,7 +601,7 @@ struct Pipeline::Impl
         auto t0 = Clock::now();
         std::vector<PersonDet> dets;
 
-        if (sess_yolo.session)
+        if (coreml_yolo || sess_yolo.session)
         {
             // YOLO11 input: 640×640.
             // We must match Ultralytics YOLO's default preprocessing (LetterBox):
@@ -585,45 +630,62 @@ struct Pipeline::Impl
                     yolo_buf[2*YH*YW + y*YW + x] = row[3*x+0] / 255.f; // B
                 }
             }
-            // Run YOLO – output shape: [1, num_dets, 56] (or [1, 56, num_dets] depending on export)
-            Ort::MemoryInfo mi = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-            std::vector<int64_t> in_shape{1, 3, YH, YW};
-            Ort::Value in_t = Ort::Value::CreateTensor<float>(
-                                  mi, yolo_buf.data(), yolo_buf.size(), in_shape.data(), 4);
 
-            try
+            int nd = 0;
+            std::vector<float> row_major;
+
+            if (coreml_yolo)
             {
-                auto outs = sess_yolo.session->Run(
-                                Ort::RunOptions{nullptr},
-                                sess_yolo.input_names.data(),  &in_t,  1,
-                                sess_yolo.output_names.data(), 1);
-
-                auto info   = outs[0].GetTensorTypeAndShapeInfo();
-                auto shape  = info.GetShape();
-                // shape is typically [1, 56, num_dets] for YOLOv8/11 pose
-                // transpose to [num_dets, 56] if needed
-                int nd = 0;
-                const float* raw = outs[0].GetTensorData<float>();
-                std::vector<float> row_major;
-
-                if (shape.size() == 3)
+                nd = 8400;
+                row_major.resize(nd * 56);
+                if (!run_coreml_yolo(coreml_yolo, yolo_buf.data(), row_major.data()))
                 {
-                    if (shape[1] == 56)
+                    fprintf(stderr, "[FSB] CoreML YOLO inference failed\n");
+                }
+            }
+            else
+            {
+                Ort::MemoryInfo mi = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+                std::vector<int64_t> in_shape{1, 3, YH, YW};
+                Ort::Value in_t = Ort::Value::CreateTensor<float>(
+                                      mi, yolo_buf.data(), yolo_buf.size(), in_shape.data(), 4);
+
+                try
+                {
+                    auto outs = sess_yolo.session->Run(
+                                    Ort::RunOptions{nullptr},
+                                    sess_yolo.input_names.data(),  &in_t,  1,
+                                    sess_yolo.output_names.data(), 1);
+
+                    auto info   = outs[0].GetTensorTypeAndShapeInfo();
+                    auto shape  = info.GetShape();
+                    const float* raw = outs[0].GetTensorData<float>();
+
+                    if (shape.size() == 3)
                     {
-                        // [1, 56, num_dets] → need transpose
-                        nd = (int)shape[2];
-                        row_major.resize(nd * 56);
-                        for (int j = 0; j < nd; ++j)
-                            for (int k = 0; k < 56; ++k)
-                                row_major[j*56+k] = raw[k*nd + j];
-                    }
-                    else
-                    {
-                        // [1, num_dets, 56]
-                        nd = (int)shape[1];
-                        row_major.assign(raw, raw + nd * 56);
+                        if (shape[1] == 56)
+                        {
+                            nd = (int)shape[2];
+                            row_major.resize(nd * 56);
+                            for (int j = 0; j < nd; ++j)
+                                for (int k = 0; k < 56; ++k)
+                                    row_major[j*56+k] = raw[k*nd + j];
+                        }
+                        else
+                        {
+                            nd = (int)shape[1];
+                            row_major.assign(raw, raw + nd * 56);
+                        }
                     }
                 }
+                catch (const std::exception& e)
+                {
+                    fprintf(stderr, "[FSB] YOLO inference error: %s\n", e.what());
+                }
+            }
+
+            if (nd > 0)
+            {
                 // Reverse the letterbox: YOLO coords → original image coords.
                 //   (x_orig, y_orig) = ((x_yolo - pad_x) / scale, (y_yolo - pad_y) / scale)
                 dets = parse_yolo_output(row_major.data(), nd,
@@ -643,10 +705,6 @@ struct Pipeline::Impl
                         }
                     }
                 }
-            }
-            catch (const Ort::Exception& e)
-            {
-                fprintf(stderr, "[FSB] YOLO inference error: %s\n", e.what());
             }
         }
 
@@ -697,17 +755,26 @@ struct Pipeline::Impl
         const int BACKBONE_DIM = 1280;
         const size_t feat_elems = (size_t)B * BACKBONE_DIM * FEAT_HW * FEAT_HW;
 
-        std::vector<int64_t> img_shape{B, 3, CROP_SIZE, CROP_SIZE};
         Ort::MemoryInfo mi = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
-        Ort::Value img_t = Ort::Value::CreateTensor<float>(
-                               mi, batch_crops.data(), batch_crops.size(), img_shape.data(), 4);
-        auto backbone_out = sess_backbone.session->Run(
-                                Ort::RunOptions{nullptr},
-                                sess_backbone.input_names.data(),  &img_t,  1,
-                                sess_backbone.output_names.data(), 1);
-        const float* feat_ptr = backbone_out[0].GetTensorData<float>();
-        std::vector<float> features(feat_ptr, feat_ptr + feat_elems);
+        std::vector<float> features(feat_elems);
+        if (coreml_backbone.loaded())
+        {
+            if (!coreml_backbone.run(batch_crops.data(), B, features.data()))
+                return {};
+        }
+        else
+        {
+            std::vector<int64_t> img_shape{B, 3, CROP_SIZE, CROP_SIZE};
+            Ort::Value img_t = Ort::Value::CreateTensor<float>(
+                                   mi, batch_crops.data(), batch_crops.size(), img_shape.data(), 4);
+            auto backbone_out = sess_backbone.session->Run(
+                                    Ort::RunOptions{nullptr},
+                                    sess_backbone.input_names.data(),  &img_t,  1,
+                                    sess_backbone.output_names.data(), 1);
+            const float* feat_ptr = backbone_out[0].GetTensorData<float>();
+            std::copy(feat_ptr, feat_ptr + feat_elems, features.begin());
+        }
         printf("[FSB] backbone:   %.1f ms\n", ms(t0));
 
         // ── decoder ──────────────────────────────────────────────────────────
@@ -719,27 +786,45 @@ struct Pipeline::Impl
         std::vector<int64_t> cond_shape{B, 3};
         std::vector<int64_t> ray_shape {B, 2, FEAT_HW, FEAT_HW};
 
-        Ort::Value feat_t = Ort::Value::CreateTensor<float>(
-                                mi, features.data(), features.size(), feat_shape.data(), 4);
-        Ort::Value cond_t = Ort::Value::CreateTensor<float>(
-                                mi, batch_cond.data(), batch_cond.size(), cond_shape.data(), 2);
-        Ort::Value ray_t  = Ort::Value::CreateTensor<float>(
-                                mi, batch_ray.data(), batch_ray.size(), ray_shape.data(), 4);
+        std::vector<float> pose_tokens(token_elems);
+        if (coreml_decoder)
+        {
+            for (int i = 0; i < B; ++i)
+            {
+                if (!run_coreml_decoder(coreml_decoder,
+                                        features.data() + i * BACKBONE_DIM * FEAT_HW * FEAT_HW,
+                                        batch_cond.data() + i * 3,
+                                        batch_ray.data() + i * 2 * FEAT_HW * FEAT_HW,
+                                        pose_tokens.data() + i * DECODER_DIM))
+                {
+                    fprintf(stderr, "[FSB] CoreML Decoder inference failed for person %d\n", i);
+                }
+            }
+        }
+        else
+        {
+            Ort::Value feat_t = Ort::Value::CreateTensor<float>(
+                                    mi, features.data(), features.size(), feat_shape.data(), 4);
+            Ort::Value cond_t = Ort::Value::CreateTensor<float>(
+                                    mi, batch_cond.data(), batch_cond.size(), cond_shape.data(), 2);
+            Ort::Value ray_t  = Ort::Value::CreateTensor<float>(
+                                    mi, batch_ray.data(), batch_ray.size(), ray_shape.data(), 4);
 
-        std::vector<Ort::Value> dec_inputs;
-        dec_inputs.push_back(std::move(feat_t));
-        dec_inputs.push_back(std::move(cond_t));
-        dec_inputs.push_back(std::move(ray_t));
+            std::vector<Ort::Value> dec_inputs;
+            dec_inputs.push_back(std::move(feat_t));
+            dec_inputs.push_back(std::move(cond_t));
+            dec_inputs.push_back(std::move(ray_t));
 
-        std::vector<const char*>& dec_in_names  = sess_decoder.input_names;
-        std::vector<const char*>& dec_out_names = sess_decoder.output_names;
+            std::vector<const char*>& dec_in_names  = sess_decoder.input_names;
+            std::vector<const char*>& dec_out_names = sess_decoder.output_names;
 
-        auto decoder_out = sess_decoder.session->Run(
-                               Ort::RunOptions{nullptr},
-                               dec_in_names.data(),  dec_inputs.data(),  dec_inputs.size(),
-                               dec_out_names.data(), 1);
-        const float* token_ptr = decoder_out[0].GetTensorData<float>();
-        std::vector<float> pose_tokens(token_ptr, token_ptr + token_elems);
+            auto decoder_out = sess_decoder.session->Run(
+                                   Ort::RunOptions{nullptr},
+                                   dec_in_names.data(),  dec_inputs.data(),  dec_inputs.size(),
+                                   dec_out_names.data(), 1);
+            const float* token_ptr = decoder_out[0].GetTensorData<float>();
+            std::copy(token_ptr, token_ptr + token_elems, pose_tokens.begin());
+        }
         printf("[FSB] decoder:    %.1f ms\n", ms(t0));
 
         // ── MHR head (CPU FFN) ────────────────────────────────────────────────
@@ -1073,6 +1158,9 @@ struct Pipeline::Impl
         mhr_ffn = CFFN{};
         cam_ffn = CFFN{};
         sess_backbone.free();
+        coreml_backbone.free();
+        if (coreml_decoder) { free_coreml_decoder(coreml_decoder); coreml_decoder = nullptr; }
+        if (coreml_yolo) { free_coreml_yolo(coreml_yolo); coreml_yolo = nullptr; }
         sess_decoder.free();
         sess_body.free();
         sess_yolo.free();

@@ -163,7 +163,7 @@ if(NOT TARGET onnxruntime::onnxruntime)
     if(EXISTS "${ONNX_RUNTIME_DIR}/include/onnxruntime/onnxruntime_cxx_api.h")
         list(APPEND ORT_INCLUDE_DIRS "${ONNX_RUNTIME_DIR}/include/onnxruntime")
     endif()
-    
+
     if(APPLE AND DEFINED ORT_LIB_DIR)
         list(APPEND CMAKE_BUILD_RPATH "${ORT_LIB_DIR}")
         list(APPEND CMAKE_INSTALL_RPATH "${ORT_LIB_DIR}")
@@ -253,16 +253,13 @@ if(WITH_CUDA)
     target_link_libraries(fast_sam_3dbody PUBLIC CUDA::cudart)
 endif()
 
-<<<<<<< HEAD
 if(SAM3D_BACKBONE_QUANT)
     target_compile_definitions(fast_sam_3dbody PUBLIC SAM3D_BACKBONE_QUANT)
-=======
 if(APPLE)
     target_link_libraries(fast_sam_3dbody PUBLIC "-framework Foundation" "-framework CoreML")
     set_source_files_properties(src/coreml_backbone.mm src/coreml_yolo.mm src/coreml_decoder.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 else()
     target_link_libraries(fast_sam_3dbody PUBLIC rt)
->>>>>>> cf08b06 (support macOS and OpenGL compilation)
 endif()
 
 target_compile_options(fast_sam_3dbody PRIVATE
