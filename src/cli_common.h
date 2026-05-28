@@ -66,6 +66,13 @@ struct CommonConfig
     std::string onnx_dir       = "./onnx";
     std::string gguf_path      = "./onnx/pipeline.gguf";
     std::string yolo_path      = "./onnx/yolo.onnx";
+    // Backbone filename within onnx_dir.  cmake -DSAM3D_BACKBONE_QUANT=ON
+    // bakes in "backbone_int8.onnx"; --backbone overrides at runtime.
+#ifdef SAM3D_BACKBONE_QUANT
+    std::string backbone_name  = "backbone_int8.onnx";
+#else
+    std::string backbone_name  = "backbone.onnx";
+#endif
     int         cuda_device    = 0;       // -1 = CPU
     bool        use_trt        = false;
     bool        fp16           = true;    // can be disabled with --no-fp16
@@ -120,6 +127,7 @@ inline bool parse_common_arg(int argc, const char* const* argv, int& i,
     CLI_STR ("--onnx-dir",             onnx_dir)
     CLI_STR ("--gguf",                 gguf_path)
     CLI_STR ("--yolo",                 yolo_path)
+    CLI_STR ("--backbone",             backbone_name)
     CLI_STR ("--from",                 from)
     CLI_INT ("--cuda",                 cuda_device)
     CLI_BOOL("--trt",                  use_trt, true)
@@ -157,6 +165,7 @@ inline void apply_common_to_pipeline_cfg(const CommonConfig& c,
                                           fsb::PipelineConfig& pc)
 {
     pc.onnx_dir       = c.onnx_dir;
+    pc.backbone_name  = c.backbone_name;
     pc.gguf_path      = c.gguf_path;
     pc.yolo_path      = c.yolo_path;
     pc.cuda_device    = c.cuda_device;
@@ -180,6 +189,8 @@ inline void print_common_args_help(FILE* fp)
     std::fprintf(fp,
         "Common (parsed by cli_common.h):\n"
         "  --onnx-dir PATH                Directory with backbone/decoder ONNX files\n"
+        "  --backbone NAME                Backbone filename within onnx-dir (default backbone.onnx;\n"
+        "                                 use backbone_int8.onnx after running tools/quantize_backbone.py)\n"
         "  --gguf     PATH                pipeline.gguf (MHR + camera heads)\n"
         "  --yolo     PATH                YOLO pose model (.onnx)\n"
         "  --from     PATH                Input source (file path, or webcam index where supported)\n"

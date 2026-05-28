@@ -39,6 +39,23 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# Backbone quantization  (build-time default; overridable at runtime via --backbone)
+# ---------------------------------------------------------------------------
+# After running tools/quantize_backbone.py you can switch the baked-in default
+# filename from backbone.onnx to backbone_int8.onnx so all three binaries pick
+# up the quantized model without needing the --backbone flag every invocation.
+# The original backbone.onnx is never removed — both coexist in onnx/.
+#
+# Usage:  cmake -DSAM3D_BACKBONE_QUANT=ON ..
+# ---------------------------------------------------------------------------
+option(SAM3D_BACKBONE_QUANT
+    "Default to backbone_int8.onnx instead of backbone.onnx (run tools/quantize_backbone.py first)"
+    OFF)
+if(SAM3D_BACKBONE_QUANT)
+    message(STATUS "SAM3D_BACKBONE_QUANT=ON — default backbone: backbone_int8.onnx")
+endif()
+
+# ---------------------------------------------------------------------------
 # CUDA  (optional – enables ONNX Runtime CUDA EP and ggml CUDA backend)
 # ---------------------------------------------------------------------------
 find_package(CUDAToolkit QUIET)
@@ -204,6 +221,10 @@ target_link_libraries(fast_sam_3dbody PUBLIC
 if(WITH_CUDA)
     target_compile_definitions(fast_sam_3dbody PUBLIC GGML_USE_CUDA FSB_CUDA)
     target_link_libraries(fast_sam_3dbody PUBLIC CUDA::cudart)
+endif()
+
+if(SAM3D_BACKBONE_QUANT)
+    target_compile_definitions(fast_sam_3dbody PUBLIC SAM3D_BACKBONE_QUANT)
 endif()
 
 target_compile_options(fast_sam_3dbody PRIVATE

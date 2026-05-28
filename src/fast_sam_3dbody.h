@@ -77,6 +77,7 @@ struct MHRResult {
 struct PipelineConfig {
     // Paths
     std::string onnx_dir;           // Directory with backbone.onnx, decoder.onnx, body_model.onnx
+    std::string backbone_name = "backbone.onnx"; // filename within onnx_dir; override for quantized variant
     std::string gguf_path;          // Path to pipeline.gguf
     std::string yolo_path;          // YOLO model: .onnx or .engine (TRT)
 

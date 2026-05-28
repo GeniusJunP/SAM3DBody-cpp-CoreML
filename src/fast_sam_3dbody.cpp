@@ -351,7 +351,7 @@ struct Pipeline::Impl
 
         printf("[FSB] Loading backbone … ");
         fflush(stdout);
-        if (!sess_backbone.load(ort_env, opath("backbone.onnx"), cuda, dev,
+        if (!sess_backbone.load(ort_env, opath(cfg.backbone_name.c_str()), cuda, dev,
                                 cfg.use_fp16, false))
             return false;
         printf("OK\n");

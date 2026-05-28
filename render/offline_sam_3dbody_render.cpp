@@ -205,6 +205,8 @@ static void print_usage(const char* prog)
         "\n"
         "REQUIRED\n"
         "  --onnx-dir PATH            Directory with backbone / decoder / body_model ONNX files\n"
+        "  --backbone NAME            Backbone filename in onnx-dir (default backbone.onnx;\n"
+        "                             use backbone_int8.onnx after tools/quantize_backbone.py)\n"
         "  --gguf     PATH            pipeline.gguf (MHR + camera heads)\n"
         "  --yolo     PATH            YOLO pose model (.onnx)\n"
         "  --from     VIDEO           Path to a video file.  Webcams / streams / still images NOT supported.\n"

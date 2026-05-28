@@ -87,6 +87,8 @@ static void print_usage(const char* prog)
 {
     printf("Usage: %s [options]\n\n", prog);
     printf("  --onnx-dir PATH   Directory with backbone/decoder/body_model ONNX files\n");
+    printf("  --backbone NAME   Backbone filename in onnx-dir (default backbone.onnx;\n");
+    printf("                    use backbone_int8.onnx after tools/quantize_backbone.py)\n");
     printf("  --gguf PATH       pipeline.gguf (MHR + camera heads)\n");
     printf("  --yolo PATH       YOLO pose model (.onnx or .engine)\n");
     printf("  --from SRC        Webcam index (0,1,..) or path to image/video\n");
