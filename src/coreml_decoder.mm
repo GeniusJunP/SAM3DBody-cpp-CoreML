@@ -107,8 +107,21 @@ extern "C" bool run_coreml_decoder(CoreMLDecoderContext ctx_ptr,
 #ifdef __cplusplus
         if (opaque_in) {
             MLMultiArray* directFeatures = (__bridge MLMultiArray*)opaque_in;
+
+            // Extract the raw data pointer and wrap it in a clean MLMultiArray
+            // to bypass the MPSGraph shape/stride assertion bug when chaining outputs.
+            // We MUST preserve the exact original shape, dataType (e.g. Float16),
+            // and strides to prevent memory corruption and type mismatches.
+            MLMultiArray* wrappedFeatures = [[MLMultiArray alloc]
+                initWithDataPointer:directFeatures.dataPointer
+                              shape:directFeatures.shape
+                           dataType:directFeatures.dataType
+                            strides:directFeatures.strides
+                        deallocator:nil
+                              error:&error];
+
             provider = [[MLDictionaryFeatureProvider alloc] initWithDictionary:@{
-                @"features": directFeatures,
+                @"features": wrappedFeatures,
                 @"condition_info": ctx->cached_cond,
                 @"ray_cond": ctx->cached_ray
             } error:&error];
