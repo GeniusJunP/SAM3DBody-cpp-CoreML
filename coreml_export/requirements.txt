@@ -8,3 +8,14 @@ coremltools==9.0
 numpy
 opencv-python
 timm
+huggingface_hub
+braceexpand
+einops
+omegaconf
+yacs
+roma
+pyrender
+trimesh
+pytorch_lightning
+termcolor
+ultralytics

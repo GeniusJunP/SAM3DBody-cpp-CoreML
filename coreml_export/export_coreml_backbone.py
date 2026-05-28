@@ -8,7 +8,7 @@ import torch
 
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-FAST_REPO = os.path.join(ROOT, "fast_sam_3d_body")
+FAST_REPO = os.path.join(ROOT, "..", "Fast-SAM-3D-Body")
 sys.path.insert(0, FAST_REPO)
 
 os.environ.setdefault("SKIP_KEYPOINT_PROMPT", "1")

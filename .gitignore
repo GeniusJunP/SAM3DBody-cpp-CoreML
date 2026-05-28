@@ -56,8 +56,7 @@ build-coreml/
 coreml_export/backbone_coreml.mlpackage/
 coreml_export/backbone_coreml_compiled/
 coreml_export/checkpoints/
-coreml_export/facebook_sam_3d_body/
-coreml_export/fast_sam_3d_body/
+/Fast-SAM-3D-Body/
 coreml_export/onnx_fp32/
 coreml_export/.venv/
 coreml_export/.venv311/

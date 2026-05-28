@@ -10,9 +10,11 @@ models:
 	@echo "========================================"
 	cd coreml_export && .venv311/bin/python export_coreml_backbone.py --size $(BACKBONE_SIZE)
 	cd coreml_export && .venv311/bin/python export_coreml_decoder.py --size $(BACKBONE_SIZE)
+	cd coreml_export && .venv311/bin/python export_coreml_yolo.py
 	@echo "Compiling CoreML packages to mlmodelc..."
-	xcrun coremlcompiler compile ./coreml_export/backbone_coreml.mlpackage ./coreml_export/
-	xcrun coremlcompiler compile ./coreml_export/decoder_coreml.mlpackage ./coreml_export/
+	xcrun coremlcompiler compile ./coreml_export/backbone_coreml.mlpackage ./coreml_export/ 2>/dev/null
+	xcrun coremlcompiler compile ./coreml_export/decoder_coreml.mlpackage ./coreml_export/ 2>/dev/null
+	xcrun coremlcompiler compile ./coreml_export/yolo_coreml.mlpackage ./coreml_export/ 2>/dev/null
 	@echo "Models ready."
 
 build:
@@ -25,3 +27,5 @@ build:
 clean:
 	rm -rf build
 	rm -rf coreml_export/backbone_coreml.mlmodelc
+	rm -rf coreml_export/decoder_coreml.mlmodelc
+	rm -rf coreml_export/yolo_coreml.mlmodelc
