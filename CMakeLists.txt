@@ -1,9 +1,17 @@
 cmake_minimum_required(VERSION 3.18)
 project(fast_sam_3dbody CXX C)
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# ---------------------------------------------------------------------------
+# Options
+# ---------------------------------------------------------------------------
+option(FSB_BACKBONE_SIZE "Size of the backbone image input (e.g. 512 or 1024)" 512)
 
 # ---------------------------------------------------------------------------
 # Model files check
@@ -87,6 +95,7 @@ set(GGML_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GGML_BLAS           OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP         OFF CACHE BOOL "" FORCE)
+set(GGML_METAL          OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(ggml)
 
 # ---------------------------------------------------------------------------
@@ -151,6 +160,15 @@ endif()
 if(NOT TARGET onnxruntime::onnxruntime)
     set(ORT_INCLUDE_DIRS "${ONNX_RUNTIME_DIR}/include")
     set(ORT_LIB_DIR      "${ONNX_RUNTIME_DIR}/lib")
+    if(EXISTS "${ONNX_RUNTIME_DIR}/include/onnxruntime/onnxruntime_cxx_api.h")
+        list(APPEND ORT_INCLUDE_DIRS "${ONNX_RUNTIME_DIR}/include/onnxruntime")
+    endif()
+    
+    if(APPLE AND DEFINED ORT_LIB_DIR)
+        list(APPEND CMAKE_BUILD_RPATH "${ORT_LIB_DIR}")
+        list(APPEND CMAKE_INSTALL_RPATH "${ORT_LIB_DIR}")
+        set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+    endif()
     find_library(ORT_LIB onnxruntime PATHS "${ORT_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
     add_library(onnxruntime::onnxruntime SHARED IMPORTED)
     set_target_properties(onnxruntime::onnxruntime PROPERTIES
@@ -180,10 +198,16 @@ add_subdirectory(AmMatrix)
 set(MOCAP_DIR ${GRAPHICS_ENGINE_DIR}/MotionCaptureLoader)
 set(TRAJ_DIR  ${GRAPHICS_ENGINE_DIR}/TrajectoryParser)
 
+set(FSB_COREML_SOURCE src/coreml_backbone.cpp src/coreml_yolo.cpp src/coreml_decoder.cpp)
+if(APPLE)
+    set(FSB_COREML_SOURCE src/coreml_backbone.mm src/coreml_yolo.mm src/coreml_decoder.mm)
+endif()
+
 add_library(fast_sam_3dbody SHARED
     src/fast_sam_3dbody.cpp
     src/fast_sam_3dbody_capi.cpp
     src/bvh_writer.cpp
+    ${FSB_COREML_SOURCE}
     ${GRAPHICS_ENGINE_DIR}/ModelLoader/model_loader_tri.c
     ${GRAPHICS_ENGINE_DIR}/ModelLoader/model_loader_transform_joints.c
     # MotionCaptureLoader (BVH I/O) ------------------------------------------------
@@ -209,6 +233,11 @@ target_include_directories(fast_sam_3dbody PUBLIC
     ${ORT_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
 )
+if(APPLE)
+    target_include_directories(fast_sam_3dbody PUBLIC /opt/homebrew/include /opt/X11/include)
+endif()
+
+target_compile_definitions(fast_sam_3dbody PUBLIC FSB_BACKBONE_SIZE=${FSB_BACKBONE_SIZE})
 
 target_link_libraries(fast_sam_3dbody PUBLIC
     ggml
@@ -224,8 +253,16 @@ if(WITH_CUDA)
     target_link_libraries(fast_sam_3dbody PUBLIC CUDA::cudart)
 endif()
 
+<<<<<<< HEAD
 if(SAM3D_BACKBONE_QUANT)
     target_compile_definitions(fast_sam_3dbody PUBLIC SAM3D_BACKBONE_QUANT)
+=======
+if(APPLE)
+    target_link_libraries(fast_sam_3dbody PUBLIC "-framework Foundation" "-framework CoreML")
+    set_source_files_properties(src/coreml_backbone.mm src/coreml_yolo.mm src/coreml_decoder.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+else()
+    target_link_libraries(fast_sam_3dbody PUBLIC rt)
+>>>>>>> cf08b06 (support macOS and OpenGL compilation)
 endif()
 
 target_compile_options(fast_sam_3dbody PRIVATE
@@ -266,16 +303,32 @@ target_include_directories(fast_sam_3dbody_render PRIVATE
     ${GLEW_INCLUDE_DIRS}
 )
 
-target_link_libraries(fast_sam_3dbody_render PRIVATE
-    fast_sam_3dbody
-    OpenGL::GL
-    GLEW::GLEW
-    ${OpenCV_LIBS}
-    X11
-    rt
-    m
-    AmMatrix
-)
+if(APPLE)
+    target_link_directories(fast_sam_3dbody_render PRIVATE /opt/homebrew/lib /opt/X11/lib)
+    target_link_libraries(fast_sam_3dbody_render PRIVATE
+        fast_sam_3dbody
+        GL
+        GLEW::GLEW
+        ${OpenCV_LIBS}
+        X11
+        m
+        AmMatrix
+    )
+else()
+    target_link_libraries(fast_sam_3dbody_render PRIVATE
+        fast_sam_3dbody
+        OpenGL::GL
+        GLEW::GLEW
+        ${OpenCV_LIBS}
+        X11
+        m
+        AmMatrix
+    )
+endif()
+
+if(NOT APPLE)
+    target_link_libraries(fast_sam_3dbody_render PRIVATE rt)
+endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(fast_sam_3dbody_render PRIVATE
