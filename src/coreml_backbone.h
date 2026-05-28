@@ -17,7 +17,7 @@ public:
 
     // Runs a fixed-shape SAM3D backbone exported as [1,3,512,512] -> [1,1280,32,32].
     // Batch inputs are handled by invoking the CoreML model once per person.
-    bool run(const float* input_nchw, int batch, float* output_nchw);
+    bool run(const float* input_nchw, int batch, float* output_nchw, void** opaque_out = nullptr);
 
     void free();
     bool loaded() const;

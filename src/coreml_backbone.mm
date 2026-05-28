@@ -111,7 +111,7 @@ bool CoreMLBackbone::load(const std::string& mlpackage_path)
     }
 }
 
-bool CoreMLBackbone::run(const float* input_nchw, int batch, float* output_nchw)
+bool CoreMLBackbone::run(const float* input_nchw, int batch, float* output_nchw, void** opaque_out)
 {
     if (!impl_->model || !input_nchw || !output_nchw || batch <= 0) {
         return false;
@@ -140,6 +140,11 @@ bool CoreMLBackbone::run(const float* input_nchw, int batch, float* output_nchw)
             if (!features) {
                 std::fprintf(stderr, "[FSB] CoreML backbone returned no output.\n");
                 return false;
+            }
+
+            if (opaque_out) {
+                opaque_out[b] = (void*)CFBridgingRetain(features);
+                continue; // Skip the copy and type conversion entirely!
             }
 
             float* dst = output_nchw + (size_t)b * output_elems;
