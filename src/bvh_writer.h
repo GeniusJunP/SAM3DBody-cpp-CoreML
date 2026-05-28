@@ -33,7 +33,10 @@ public:
               const std::string& lbs_path   = "",
               bool               rewrite_body_offsets       = true,
               bool               rewrite_hand_offsets       = true,
-              bool               compensate_finger_endsites = true);
+              bool               compensate_finger_endsites = true,
+              bool               enforce_hand_limits        = false,
+              bool               zero_hand_pose             = false,
+              bool               sticky_hand_pose           = false);
 
     void write_frame(const std::vector<fsb::MHRResult>& results);
 
@@ -103,6 +106,9 @@ private:
     bool               rewrite_body_offsets_       = true;
     bool               rewrite_hand_offsets_       = true;
     bool               compensate_finger_endsites_ = true;
+    bool               enforce_hand_limits_        = false;
+    bool               zero_hand_pose_             = false;
+    bool               sticky_hand_pose_           = false;
 
     std::vector<BvhSlot> slots_;             // shared template
     int                  root_bvh_jid_ = -1;

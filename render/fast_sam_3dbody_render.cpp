@@ -485,6 +485,9 @@ int main(int argc, const char** argv) {
     bool        bvh_body_shape_change          = true;
     bool        bvh_hand_shape_change          = true;
     bool        bvh_compensate_finger_endsites = true;
+    bool        bvh_enforce_hand_limits        = false;
+    bool        bvh_zero_hand_pose             = false;
+    bool        bvh_sticky_hand_pose           = false;
     bool        use_butterworth    = false;
     float       bw_cutoff         = 6.0f;   // Hz; higher = less lag, less smoothing
     bool        filter_root_rot   = false;  // enabled by --butterworth-root-rotation
@@ -539,6 +542,9 @@ int main(int argc, const char** argv) {
     bvh_body_shape_change          = cc.bvh_body_shape_change;
     bvh_hand_shape_change          = cc.bvh_hand_shape_change;
     bvh_compensate_finger_endsites = cc.bvh_compensate_finger_endsites;
+    bvh_enforce_hand_limits        = cc.bvh_enforce_hand_limits;
+    bvh_zero_hand_pose             = cc.bvh_zero_hand_pose;
+    bvh_sticky_hand_pose           = cc.bvh_sticky_hand_pose;
     bw_cutoff                      = cc.bw_cutoff;
     rot_clamp_deg                  = cc.rot_clamp_deg;
 
@@ -653,7 +659,10 @@ int main(int argc, const char** argv) {
         if (bvh_template.empty()) bvh_template = "./body.bvh";
         if (!bvh_writer.open(bvh_template, bvh_path, 1.f / video_fps, lbs_path,
                              bvh_body_shape_change, bvh_hand_shape_change,
-                             bvh_compensate_finger_endsites))
+                             bvh_compensate_finger_endsites,
+                             bvh_enforce_hand_limits,
+                             bvh_zero_hand_pose,
+                             bvh_sticky_hand_pose))
             fprintf(stderr, "[BVH] Warning: could not open BVH writer\n");
         else
             printf("[BVH] Writing to %s (%.1f fps)\n", bvh_path.c_str(), video_fps);

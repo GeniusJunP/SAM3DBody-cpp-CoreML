@@ -96,6 +96,8 @@ FIXED=(
     --onnx-dir ./onnx
     --gguf     ./onnx/pipeline.gguf
     --yolo     ./onnx/yolo.onnx
+    --enforce-hand-limits
+    --sticky-hand-pose
 )
 if [ $HAS_FROM -eq 1 ]; then
     "${FIXED[@]}" "${OFFLINE_ARGS[@]}"

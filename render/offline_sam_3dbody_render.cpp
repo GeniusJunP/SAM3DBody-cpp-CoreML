@@ -1383,7 +1383,10 @@ static void export_to_bvh(const std::vector<FrameRecord>& frames,
     BVHWriter w;
     if (!w.open(cfg.bvh_template, cfg.bvh_path, 1.0f / (float)fps, cfg.lbs_path,
                 cfg.bvh_body_shape_change, cfg.bvh_hand_shape_change,
-                cfg.bvh_compensate_finger_endsites))
+                cfg.bvh_compensate_finger_endsites,
+                cfg.bvh_enforce_hand_limits,
+                cfg.bvh_zero_hand_pose,
+                cfg.bvh_sticky_hand_pose))
     {
         fprintf(stderr, "[pass6] BVHWriter::open failed — aborting export\n");
         return;

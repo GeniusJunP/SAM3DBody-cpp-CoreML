@@ -484,7 +484,10 @@ int main(int argc, char** argv)
                              lbs_path,
                              c.bvh_body_shape_change,
                              c.bvh_hand_shape_change,
-                             c.bvh_compensate_finger_endsites))
+                             c.bvh_compensate_finger_endsites,
+                             c.bvh_enforce_hand_limits,
+                             c.bvh_zero_hand_pose,
+                             c.bvh_sticky_hand_pose))
         {
             fprintf(stderr, "[main] BVH writer failed to open (continuing without BVH output).\n");
         }

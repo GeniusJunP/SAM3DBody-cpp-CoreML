@@ -42,6 +42,8 @@ FIXED=(
     --yolo     ./onnx/yolo.onnx
     --mesh     ./body_mesh.tri
     --lbs      onnx/body_model.lbs
+    --enforce-hand-limits
+    --sticky-hand-pose
 )
 
 if [ "$SAVE_REQUESTED" -eq 0 ]; then

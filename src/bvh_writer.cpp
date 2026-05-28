@@ -181,6 +181,80 @@ constexpr NameMap NAME_MAP[] =
     { "finger5-1.r","r_pinky1",HAND }, { "finger5-2.r","r_pinky2",HAND }, { "finger5-3.r","r_pinky3",HAND },
 };
 
+// ─── Hand joint angle limits (--enforce-hand-limits) ───────────────────────
+// Per-BVH-joint-name limits on the ZXY rotation channels written to the BVH.
+// Channel order matches the template: Zrotation Xrotation Yrotation.
+//
+// Derived from MocapNET's createRandomHandDataset.sh natural-hand pose and
+// the observed natural range-of-motion of human finger joints.  Applied when
+// the BVHWriter::enforce_hand_limits_ flag is set.
+//
+// For finger proximal joints (finger[2-5]-1) the most common artefact from
+// the MHR model on footage where hands are not clearly visible is a large Z
+// offset (~35-40°) that makes fingers splay wide.  The ±20° Z limit fixes
+// this while still allowing natural spread.
+struct HandLimitEntry {
+    const char* bvh_name;
+    float z_min, z_max;   // Zrotation limits (degrees)
+    float x_min, x_max;   // Xrotation limits (degrees)
+    float y_min, y_max;   // Yrotation limits (degrees)
+};
+
+// clang-format off
+static const HandLimitEntry HAND_LIMITS[] = {
+    // ── proximal phalanges (knuckles) ──────────────────────────────────────
+    // Z = spread/abduction  X = flex/extend  Y = axial twist
+    { "finger2-1.r", -20, 20,  -5, 90,  -10, 10 },
+    { "finger3-1.r", -20, 20,  -5, 90,  -10, 10 },
+    { "finger4-1.r", -20, 20,  -5, 90,  -10, 10 },
+    { "finger5-1.r", -22, 10,  -5, 90,  -10, 10 },  // pinky naturally adducts a bit
+    { "finger2-1.l",  -20, 20,  -5, 90,  -10, 10 },
+    { "finger3-1.l",  -20, 20,  -5, 90,  -10, 10 },
+    { "finger4-1.l",  -20, 20,  -5, 90,  -10, 10 },
+    { "finger5-1.l",  -10, 22,  -5, 90,  -10, 10 },
+
+    // ── middle phalanges ──────────────────────────────────────────────────
+    { "finger2-2.r", -10, 10,  -5, 90,  -5, 5 },
+    { "finger3-2.r", -10, 10,  -5, 90,  -5, 5 },
+    { "finger4-2.r", -10, 10,  -5, 90,  -5, 5 },
+    { "finger5-2.r", -10, 10,  -5, 90,  -5, 5 },
+    { "finger2-2.l", -10, 10,  -5, 90,  -5, 5 },
+    { "finger3-2.l", -10, 10,  -5, 90,  -5, 5 },
+    { "finger4-2.l", -10, 10,  -5, 90,  -5, 5 },
+    { "finger5-2.l", -10, 10,  -5, 90,  -5, 5 },
+
+    // ── distal phalanges ──────────────────────────────────────────────────
+    { "finger2-3.r", -10, 10,  -5, 80,  -5, 5 },
+    { "finger3-3.r", -10, 10,  -5, 80,  -5, 5 },
+    { "finger4-3.r", -10, 10,  -5, 80,  -5, 5 },
+    { "finger5-3.r", -10, 10,  -5, 80,  -5, 5 },
+    { "finger2-3.l", -10, 10,  -5, 80,  -5, 5 },
+    { "finger3-3.l", -10, 10,  -5, 80,  -5, 5 },
+    { "finger4-3.l", -10, 10,  -5, 80,  -5, 5 },
+    { "finger5-3.l", -10, 10,  -5, 80,  -5, 5 },
+
+    // ── thumb (wider opposition range) ────────────────────────────────────
+    { "rthumb",     -60, 60,  -60, 60,  -60, 60 },
+    { "lthumb",     -60, 60,  -60, 60,  -60, 60 },
+    { "finger1-2.r",-45, 45,  -45, 90,  -20, 20 },
+    { "finger1-3.r",-30, 30,  -5,  80,  -10, 10 },
+    { "finger1-2.l",-45, 45,  -45, 90,  -20, 20 },
+    { "finger1-3.l",-30, 30,  -5,  80,  -10, 10 },
+};
+// clang-format on
+
+static const HandLimitEntry* find_hand_limit(const char* name)
+{
+    for (const auto& e : HAND_LIMITS)
+        if (strcmp(e.bvh_name, name) == 0) return &e;
+    return nullptr;
+}
+
+static inline float clampf(float v, float lo, float hi)
+{
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
 }  // namespace
 
 // ─── Tracker ────────────────────────────────────────────────────────────────
@@ -352,12 +426,18 @@ bool BVHWriter::open(const std::string& template_path,
                      const std::string& lbs_path,
                      bool               rewrite_body_offsets,
                      bool               rewrite_hand_offsets,
-                     bool               compensate_finger_endsites)
+                     bool               compensate_finger_endsites,
+                     bool               enforce_hand_limits,
+                     bool               zero_hand_pose,
+                     bool               sticky_hand_pose)
 {
     out_path_                    = out_path;
     rewrite_body_offsets_        = rewrite_body_offsets;
     rewrite_hand_offsets_        = rewrite_hand_offsets;
     compensate_finger_endsites_  = compensate_finger_endsites;
+    enforce_hand_limits_         = enforce_hand_limits;
+    zero_hand_pose_              = zero_hand_pose;
+    sticky_hand_pose_            = sticky_hand_pose;
 
     mc_ = (BVH_MotionCapture*)calloc(1, sizeof(*mc_));
     if (!mc_) return false;
@@ -533,12 +613,22 @@ void BVHWriter::append_frame_for(PerPerson& p, const fsb::MHRResult& r)
         qmul(out, &q_global_mhr_[m * 4], inv_rest);
     };
 
+    // Previous frame row (for sticky hand mode).
+    const float* prev_row = (p.frame_count > 0)
+        ? p.motion.data() + (size_t)(p.frame_count - 1) * total_channels_
+        : nullptr;
+
     for (size_t i = 0; i < slots_.size(); ++i)
     {
         const BvhSlot& s = slots_[i];
         if (s.mhr_idx < 0)                  continue;
         const auto& jh = mc_->jointHierarchy[s.bvh_jid];
         if (jh.isEndSite)                   continue;
+
+        // ── Hand pose override modes ───────────────────────────────────────
+        // zero_hand_pose: skip entirely — row is zero-initialised.
+        if (s.kind == SlotKind::Hand && zero_hand_pose_)
+            continue;
 
         float q_delta_self[4];
         delta_mhr(s.mhr_idx, q_delta_self);
@@ -575,9 +665,72 @@ void BVHWriter::append_frame_for(PerPerson& p, const fsb::MHRResult& r)
         {
             float a, b, c;
             mat3_to_zxy(m, a, b, c);
-            set_channel(mc_, row, s.bvh_jid, BVH_ROTATION_Z, a * RAD2DEG);
-            set_channel(mc_, row, s.bvh_jid, BVH_ROTATION_X, b * RAD2DEG);
-            set_channel(mc_, row, s.bvh_jid, BVH_ROTATION_Y, c * RAD2DEG);
+            float az = a * RAD2DEG, bx = b * RAD2DEG, cy = c * RAD2DEG;
+
+            if (s.kind == SlotKind::Hand)
+            {
+                const HandLimitEntry* lim = nullptr;
+                if (enforce_hand_limits_ || sticky_hand_pose_)
+                {
+                    const char* jname = mc_->jointHierarchy[s.bvh_jid].jointName;
+                    lim = find_hand_limit(jname);
+                }
+
+                if (lim)
+                {
+                    auto within = [](float v, float lo, float hi)
+                        { return v >= lo && v <= hi; };
+
+                    if (sticky_hand_pose_)
+                    {
+                        // Limits-gated sticky: accept new pose only when within
+                        // limits; otherwise inherit the previous frame's value.
+                        // On the first frame (no prev_row) fall back to clamping.
+                        auto resolve = [&](unsigned int ch) -> unsigned int {
+                            return bvh_resolveFrameAndJointAndChannelToMotionID(
+                                       mc_, (BVHJointID)s.bvh_jid, 0, ch);
+                        };
+                        unsigned int iz = resolve(BVH_ROTATION_Z);
+                        unsigned int ix = resolve(BVH_ROTATION_X);
+                        unsigned int iy = resolve(BVH_ROTATION_Y);
+                        row[iz] = within(az, lim->z_min, lim->z_max) ? az
+                                  : (prev_row ? prev_row[iz] : clampf(az, lim->z_min, lim->z_max));
+                        row[ix] = within(bx, lim->x_min, lim->x_max) ? bx
+                                  : (prev_row ? prev_row[ix] : clampf(bx, lim->x_min, lim->x_max));
+                        row[iy] = within(cy, lim->y_min, lim->y_max) ? cy
+                                  : (prev_row ? prev_row[iy] : clampf(cy, lim->y_min, lim->y_max));
+                        continue;  // channels already written above
+                    }
+                    else if (enforce_hand_limits_)
+                    {
+                        az = clampf(az, lim->z_min, lim->z_max);
+                        bx = clampf(bx, lim->x_min, lim->x_max);
+                        cy = clampf(cy, lim->y_min, lim->y_max);
+                    }
+                }
+                else if (sticky_hand_pose_)
+                {
+                    // No limit table entry for this joint: pure inherit (or neutral).
+                    if (prev_row)
+                    {
+                        for (unsigned int ch : { (unsigned int)BVH_ROTATION_Z,
+                                                 (unsigned int)BVH_ROTATION_X,
+                                                 (unsigned int)BVH_ROTATION_Y })
+                        {
+                            unsigned int idx = bvh_resolveFrameAndJointAndChannelToMotionID(
+                                                   mc_, (BVHJointID)s.bvh_jid, 0, ch);
+                            row[idx] = prev_row[idx];
+                        }
+                        continue;
+                    }
+                    // No prev_row: leave neutral (zeros).
+                    continue;
+                }
+            }
+
+            set_channel(mc_, row, s.bvh_jid, BVH_ROTATION_Z, az);
+            set_channel(mc_, row, s.bvh_jid, BVH_ROTATION_X, bx);
+            set_channel(mc_, row, s.bvh_jid, BVH_ROTATION_Y, cy);
         }
 
         // Sample live bone vector for the OFFSET rewrite (length-only at close).

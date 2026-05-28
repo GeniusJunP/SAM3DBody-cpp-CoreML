@@ -93,6 +93,9 @@ struct CommonConfig
     bool        bvh_body_shape_change          = true;   // --no-bvh-body-shape-change
     bool        bvh_hand_shape_change          = true;   // --no-bvh-hand-shape-change
     bool        bvh_compensate_finger_endsites = true;   // --bvh-raw-fingers
+    bool        bvh_enforce_hand_limits        = false;  // --enforce-hand-limits
+    bool        bvh_zero_hand_pose             = false;  // --zero-hand-pose
+    bool        bvh_sticky_hand_pose           = false;  // --sticky-hand-pose
 
     // ── Filtering knobs ─────────────────────────────────────────────────────
     // Defaults match the live binaries; the offline binary overrides
@@ -143,6 +146,9 @@ inline bool parse_common_arg(int argc, const char* const* argv, int& i,
     CLI_BOOL("--no-bvh-body-shape-change", bvh_body_shape_change,          false)
     CLI_BOOL("--no-bvh-hand-shape-change", bvh_hand_shape_change,          false)
     CLI_BOOL("--bvh-raw-fingers",          bvh_compensate_finger_endsites, false)
+    CLI_BOOL("--enforce-hand-limits",      bvh_enforce_hand_limits,        true)
+    CLI_BOOL("--zero-hand-pose",           bvh_zero_hand_pose,             true)
+    CLI_BOOL("--sticky-hand-pose",         bvh_sticky_hand_pose,           true)
 
     // Filters
     CLI_FLT ("--bw-cutoff",            bw_cutoff)
@@ -204,6 +210,10 @@ inline void print_common_args_help(FILE* fp)
         "  --no-bvh-body-shape-change     Keep template body bone lengths\n"
         "  --no-bvh-hand-shape-change     Keep template hand/finger bone lengths\n"
         "  --bvh-raw-fingers              Do not rescale finger End-Site OFFSETs\n"
+        "  --enforce-hand-limits          Clamp finger joint angles to anatomical limits\n"
+        "                                 (fixes wild splay when hands are not visible)\n"
+        "  --zero-hand-pose               Always write neutral (straight) hand pose\n"
+        "  --sticky-hand-pose             Inherit previous frame's hand pose (neutral on first frame)\n"
         "  --bw-cutoff HZ                 Butterworth cutoff (default 6 Hz)\n"
         "  --rot-clamp DEG                Geodesic SLERP clamp on global_rot (default 1 deg/frame;\n"
         "                                 offline binary defaults to 30)\n");
