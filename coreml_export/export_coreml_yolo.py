@@ -1,5 +1,6 @@
 import argparse
 import os
+import shutil
 
 import coremltools as ct
 import torch
@@ -12,14 +13,10 @@ def main():
         "--model", default="yolo11m-pose.pt", help="YOLO model path or name"
     )
     parser.add_argument("--imgsz", type=int, default=640, help="Input resolution")
-    parser.add_argument("--out-dir", default=".", help="Output directory")
+    parser.add_argument(
+        "--out-dir", default="../coreml_export", help="Output directory"
+    )
     args = parser.parse_args()
-
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    onnx_dir = os.path.abspath(os.path.join(base_dir, "..", "onnx"))
-    os.makedirs(onnx_dir, exist_ok=True)
-    current_dir = os.getcwd()
-    os.chdir(onnx_dir)
 
     print(f"Loading YOLO model: {args.model}")
     model = YOLO(args.model)
@@ -54,7 +51,6 @@ def main():
         nms=False,  # Must be set to False for parsing on C++
     )
     print(f"Exported TorchScript to: {ts_path}")
-    os.chdir(current_dir)
 
     print("Loading TorchScript and converting to CoreML...")
     traced = torch.jit.load(ts_path)
@@ -70,7 +66,12 @@ def main():
         skip_model_load=True,
     )
 
+    os.makedirs(args.out_dir, exist_ok=True)
     target_path = os.path.join(args.out_dir, "yolo_coreml.mlpackage")
+
+    if os.path.exists(target_path):
+        shutil.rmtree(target_path)
+
     print(f"saving {target_path}", flush=True)
     mlmodel.save(target_path)
     print(f"saved {target_path}", flush=True)

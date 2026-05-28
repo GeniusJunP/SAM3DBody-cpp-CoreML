@@ -10,7 +10,8 @@ models:
 	@echo "========================================"
 	cd coreml_export && .venv311/bin/python export_coreml_backbone.py --size $(BACKBONE_SIZE)
 	cd coreml_export && .venv311/bin/python export_coreml_decoder.py --size $(BACKBONE_SIZE)
-	cd coreml_export && .venv311/bin/python export_coreml_yolo.py
+	mkdir -p onnx
+	cd onnx && ../coreml_export/.venv311/bin/python ../coreml_export/export_coreml_yolo.py
 	@echo "Compiling CoreML packages to mlmodelc..."
 	xcrun coremlcompiler compile ./coreml_export/backbone_coreml.mlpackage ./coreml_export/ 2>/dev/null
 	xcrun coremlcompiler compile ./coreml_export/decoder_coreml.mlpackage ./coreml_export/ 2>/dev/null
