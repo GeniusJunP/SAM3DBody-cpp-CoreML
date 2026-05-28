@@ -9,8 +9,10 @@ models:
 	@echo " Exporting Backbone (Size: $(BACKBONE_SIZE))"
 	@echo "========================================"
 	cd coreml_export && .venv311/bin/python export_coreml_backbone.py --size $(BACKBONE_SIZE)
-	@echo "Compiling CoreML package to mlmodelc..."
+	cd coreml_export && .venv311/bin/python export_coreml_decoder.py --size $(BACKBONE_SIZE)
+	@echo "Compiling CoreML packages to mlmodelc..."
 	xcrun coremlcompiler compile ./coreml_export/backbone_coreml.mlpackage ./coreml_export/
+	xcrun coremlcompiler compile ./coreml_export/decoder_coreml.mlpackage ./coreml_export/
 	@echo "Models ready."
 
 build:
