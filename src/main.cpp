@@ -13,6 +13,7 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <sys/stat.h>
 #include <time.h>
 
 // Monotonic nanosecond timestamp (POSIX; avoids chrono overhead in tight loops)
@@ -427,6 +428,31 @@ static void write_csv_rows(std::ofstream& f, int frame_no,
 int main(int argc, char** argv)
 {
     Config c = parse_args(argc, argv);
+
+    // -----------------------------------------------------------------------
+    // Sanity-check working directory: warn if onnx/ is missing and the user
+    // hasn't overridden --onnx-dir.  Common mistake: running from build/
+    // instead of the repo root.
+    // -----------------------------------------------------------------------
+    {
+        struct stat st{};
+        if (c.onnx_dir == "./onnx" && stat("./onnx", &st) != 0)
+        {
+            fprintf(stderr,
+                "\n"
+                "  ╔══════════════════════════════════════════════════════════════╗\n"
+                "  ║  WARNING: './onnx' not found in the current directory.       ║\n"
+                "  ║                                                              ║\n"
+                "  ║  You are probably running from the wrong directory.          ║\n"
+                "  ║  Run from the repository root, or pass --onnx-dir:           ║\n"
+                "  ║                                                              ║\n"
+                "  ║    cd /path/to/SAM3DBody-cpp                                 ║\n"
+                "  ║    ./build/fast_sam_3dbody_run --from YOURFILE.mp4           ║\n"
+                "  ║                                                              ║\n"
+                "  ╚══════════════════════════════════════════════════════════════╝\n"
+                "\n");
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Optional CSV output

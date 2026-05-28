@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
-# scripts/batch_video.sh PATTERN [extra flags]
+# scripts/batch_video.sh FILE [FILE ...] [-- extra flags]
 #
-# Run scripts/video.sh --save --bvh on every file matching PATTERN, serially.
+# Run scripts/video.sh --save --bvh on every supplied file, serially.
 #
-# For each matched file the derived outputs are:
+# For each file the derived outputs are:
 #   borat.mkv  →  --from borat.mkv  --save borat_rendered.mp4  --bvh borat.bvh
 #
-# Any extra flags are forwarded verbatim to every video.sh invocation.
+# Anything after the first --flag argument is forwarded verbatim to every
+# video.sh call.  Both invocation styles work:
 #
-# Usage:
-#   scripts/batch_video.sh "*.mkv"
-#   scripts/batch_video.sh "clips/*.mp4" --skip-body --butterworth
-#   scripts/batch_video.sh "*.mkv" --cuda -1 --bw-cutoff 4.0
-#
-# The PATTERN must be quoted to prevent the shell from expanding it before
-# this script can do it relative to the working directory.
+#   scripts/batch_video.sh *.mkv                      # shell expands glob
+#   scripts/batch_video.sh "*.mkv"                    # script expands glob
+#   scripts/batch_video.sh *.mkv --butterworth         # extra flags at end
+#   scripts/batch_video.sh *.mkv --cuda -1 --bw-cutoff 4.0
 
 set -euo pipefail
 
@@ -22,26 +20,44 @@ THISDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 VIDEO_SH="$THISDIR/video.sh"
 
 if [[ $# -lt 1 ]]; then
-    echo "Usage: $(basename "$0") PATTERN [extra flags for video.sh]"
-    echo "  Example: $(basename "$0") \"*.mkv\" --butterworth"
+    echo "Usage: $(basename "$0") FILE [FILE ...] [extra flags for video.sh]"
+    echo "  Examples:"
+    echo "    $(basename "$0") *.mkv"
+    echo "    $(basename "$0") *.mkv --butterworth --bw-cutoff 4.0"
     exit 1
 fi
 
-PATTERN="$1"
-shift
-EXTRA=("$@")
+# ── Split args: files (before first --flag) vs extra flags (from first --flag) ─
+FILES=()
+EXTRA=()
+in_extra=false
 
-# Expand the glob now (in the caller's working directory).
-shopt -s nullglob
-FILES=($PATTERN)
-shopt -u nullglob
+for arg in "$@"; do
+    if $in_extra; then
+        EXTRA+=("$arg")
+    elif [[ "$arg" == --* ]]; then
+        in_extra=true
+        EXTRA+=("$arg")
+    else
+        # Could be a quoted glob or a literal path — expand either way.
+        shopt -s nullglob
+        expanded=($arg)
+        shopt -u nullglob
+        if [[ ${#expanded[@]} -gt 0 ]]; then
+            FILES+=("${expanded[@]}")
+        else
+            # Literal path (may not exist yet, let video.sh error on it).
+            FILES+=("$arg")
+        fi
+    fi
+done
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
-    echo "No files matched: $PATTERN"
+    echo "No input files found."
     exit 1
 fi
 
-echo "Batch: ${#FILES[@]} file(s) matched '$PATTERN'"
+echo "Batch: ${#FILES[@]} file(s)"
 [[ ${#EXTRA[@]} -gt 0 ]] && echo "Extra flags: ${EXTRA[*]}"
 echo
 
