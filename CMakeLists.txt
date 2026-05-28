@@ -198,7 +198,7 @@ add_subdirectory(AmMatrix)
 set(MOCAP_DIR ${GRAPHICS_ENGINE_DIR}/MotionCaptureLoader)
 set(TRAJ_DIR  ${GRAPHICS_ENGINE_DIR}/TrajectoryParser)
 
-set(FSB_COREML_SOURCE src/coreml_backbone.cpp src/coreml_yolo.cpp src/coreml_decoder.cpp)
+set(FSB_COREML_SOURCE src/coreml_backbone.cpp src/coreml_yolo.cpp src/coreml_decoder.cpp src/coreml_utils.cpp)
 if(APPLE)
     set(FSB_COREML_SOURCE src/coreml_backbone.mm src/coreml_yolo.mm src/coreml_decoder.mm src/coreml_utils.mm)
 endif()

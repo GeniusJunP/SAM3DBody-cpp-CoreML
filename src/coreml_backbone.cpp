@@ -18,7 +18,7 @@ bool CoreMLBackbone::load(const std::string& mlpackage_path)
     return false;
 }
 
-bool CoreMLBackbone::run(const float* input_nchw, int batch, float* output_nchw)
+bool CoreMLBackbone::run(const float* input_nchw, int batch, float* output_nchw, void** opaque_out)
 {
     (void)input_nchw;
     (void)batch;
