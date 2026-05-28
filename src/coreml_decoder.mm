@@ -37,7 +37,7 @@ extern "C" CoreMLDecoderContext init_coreml_decoder(const char* mlpackage_path) 
         }
 
         MLModelConfiguration* config = [[MLModelConfiguration alloc] init];
-        config.computeUnits = MLComputeUnitsAll;
+        config.computeUnits = MLComputeUnitsCPUAndGPU;
 
         MLModel* model = [MLModel modelWithContentsOfURL:compiledUrl configuration:config error:&error];
         if (error || !model) {
@@ -48,7 +48,8 @@ extern "C" CoreMLDecoderContext init_coreml_decoder(const char* mlpackage_path) 
         CoreMLDecoderCtx* ctx = new CoreMLDecoderCtx();
         ctx->model = model;
 
-        ctx->cached_features = [[MLMultiArray alloc] initWithShape:@[@1, @1280, @32, @32]
+        int feat_hw = FSB_BACKBONE_SIZE / 16;
+        ctx->cached_features = [[MLMultiArray alloc] initWithShape:@[@1, @1280, @(feat_hw), @(feat_hw)]
                                                           dataType:MLMultiArrayDataTypeFloat32
                                                              error:&error];
 
@@ -56,7 +57,7 @@ extern "C" CoreMLDecoderContext init_coreml_decoder(const char* mlpackage_path) 
                                                       dataType:MLMultiArrayDataTypeFloat32
                                                          error:&error];
 
-        ctx->cached_ray = [[MLMultiArray alloc] initWithShape:@[@1, @2, @32, @32]
+        ctx->cached_ray = [[MLMultiArray alloc] initWithShape:@[@1, @2, @(feat_hw), @(feat_hw)]
                                                      dataType:MLMultiArrayDataTypeFloat32
                                                         error:&error];
 
@@ -87,18 +88,37 @@ extern "C" bool run_coreml_decoder(CoreMLDecoderContext ctx_ptr,
                                    const float* features,
                                    const float* condition_info,
                                    const float* ray_cond,
-                                   float* pose_token_out) {
+                                   float* pose_token_out
+#ifdef __cplusplus
+                                   , void* opaque_in
+#endif
+                                   ) {
     @autoreleasepool {
         if (!ctx_ptr) return false;
         CoreMLDecoderCtx* ctx = (CoreMLDecoderCtx*)ctx_ptr;
 
         NSError* error = nil;
 
-        std::memcpy((float*)ctx->cached_features.dataPointer, features, 1 * 1280 * 32 * 32 * sizeof(float));
+        int feat_hw = FSB_BACKBONE_SIZE / 16;
         std::memcpy((float*)ctx->cached_cond.dataPointer, condition_info, 1 * 3 * sizeof(float));
-        std::memcpy((float*)ctx->cached_ray.dataPointer, ray_cond, 1 * 2 * 32 * 32 * sizeof(float));
+        std::memcpy((float*)ctx->cached_ray.dataPointer, ray_cond, 1 * 2 * feat_hw * feat_hw * sizeof(float));
 
-        id<MLFeatureProvider> outProvider = [ctx->model predictionFromFeatures:ctx->cached_provider error:&error];
+        id<MLFeatureProvider> provider = ctx->cached_provider;
+#ifdef __cplusplus
+        if (opaque_in) {
+            MLMultiArray* directFeatures = (__bridge MLMultiArray*)opaque_in;
+            provider = [[MLDictionaryFeatureProvider alloc] initWithDictionary:@{
+                @"features": directFeatures,
+                @"condition_info": ctx->cached_cond,
+                @"ray_cond": ctx->cached_ray
+            } error:&error];
+        } else
+#endif
+        {
+            std::memcpy((float*)ctx->cached_features.dataPointer, features, 1 * 1280 * feat_hw * feat_hw * sizeof(float));
+        }
+
+        id<MLFeatureProvider> outProvider = [ctx->model predictionFromFeatures:provider error:&error];
         if (error || !outProvider) {
             std::cerr << "[CoreML Decoder] Prediction error: " << (error ? error.localizedDescription.UTF8String : "Unknown") << std::endl;
             return false;

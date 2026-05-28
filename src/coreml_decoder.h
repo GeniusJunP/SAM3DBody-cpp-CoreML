@@ -24,7 +24,11 @@ bool run_coreml_decoder(CoreMLDecoderContext ctx,
                         const float* features,
                         const float* condition_info,
                         const float* ray_cond,
-                        float* pose_token_out);
+                        float* pose_token_out
+#ifdef __cplusplus
+                        , void* opaque_in = nullptr
+#endif
+                        );
 
 #ifdef __cplusplus
 }
