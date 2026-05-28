@@ -217,6 +217,13 @@ def main():
         print(f"\nWARNING: {avail_gb:.1f} GB RAM available, model is {in_gb:.2f} GB.")
         print("         Quantization needs ~1.5× model size in RAM.  Close other apps.")
 
+    # If the input uses external data (backbone.onnx.data exists), the output
+    # must also use external data — the int8 model is still >2 GB and protobuf
+    # has a 2 GB hard limit for single-file serialisation.
+    has_ext_data = os.path.exists(in_path + ".data")
+    if has_ext_data:
+        print("  External data detected — output will also use external data format.")
+
     t0 = time.time()
 
     if args.mode == "dynamic":
@@ -226,10 +233,10 @@ def main():
             in_path,
             out_path,
             weight_type=QuantType.QInt8,
+            use_external_data_format=has_ext_data,
             # MatMulConstBOnly=True: skip dynamic attention score MatMuls (Q@K^T).
             # This is critical for ViT accuracy — only project-weight MatMuls are quantized.
             extra_options={"MatMulConstBOnly": True},
-            optimize_model=False,  # skip ORT graph optimizer (can mangle external-data graphs)
         )
     else:
         print("\nRunning static quantization …")
@@ -250,7 +257,7 @@ def main():
             per_channel=args.per_channel,
             weight_type=QuantType.QInt8,
             activation_type=QuantType.QInt8,
-            optimize_model=False,
+            use_external_data_format=has_ext_data,
         )
 
     elapsed = time.time() - t0
