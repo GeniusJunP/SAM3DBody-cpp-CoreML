@@ -21,7 +21,7 @@ os.environ.setdefault("MHR_NO_CORRECTIVES", "1")
 
 # ── Fixed constants (verified from model) ──────────────────────────────
 B = 1
-FEAT_H = FEAT_W = 32
+
 BACKBONE_DIM = 1280
 DECODER_DIM = 1024
 
@@ -37,8 +37,9 @@ class CoreMLDecoderWrapper(nn.Module):
     Output:  pose_token [1,1024]
     """
 
-    def __init__(self, model):
+    def __init__(self, model, size):
         super().__init__()
+        self.feat_hw = size // 16
         self.ray_cond_emb = model.ray_cond_emb
         self.decoder = model.decoder
         self.init_pose = model.init_pose
@@ -56,11 +57,12 @@ class CoreMLDecoderWrapper(nn.Module):
         self.decoder.keypoint_token_update = None
 
     def forward(self, features, cond_info, ray_cond):
-        # ── CameraEncoder (all shapes literal) ────────────────────────
-        rays = ray_cond.permute(0, 2, 3, 1)                          # [1,32,32,2]
-        rays = torch.cat([rays, torch.ones_like(rays[..., :1])], -1)  # [1,32,32,3]
-        rays_emb = self.ray_cond_emb.camera(pos=rays.reshape(1, 1024, 3))  # [1,1024,99]
-        rays_emb = rays_emb.reshape(1, 32, 32, -1).permute(0, 3, 1, 2).contiguous()
+        # ── CameraEncoder ─────────────────────────────────────────────
+        H = W = self.feat_hw
+        rays = ray_cond.permute(0, 2, 3, 1)                          # [1,H,W,2]
+        rays = torch.cat([rays, torch.ones_like(rays[..., :1])], -1)  # [1,H,W,3]
+        rays_emb = self.ray_cond_emb.camera(pos=rays.reshape(1, H * W, 3))  # [1,H*W,99]
+        rays_emb = rays_emb.reshape(1, H, W, -1).permute(0, 3, 1, 2).contiguous()
         z = torch.cat([features, rays_emb], dim=1)
         features = self.ray_cond_emb.norm(self.ray_cond_emb.conv(z))  # [1,1280,32,32]
 
@@ -97,7 +99,7 @@ class CoreMLDecoderWrapper(nn.Module):
                 tok_aug = torch.cat([tok_aug, torch.zeros_like(emb)], dim=1)
 
         # ── Image positional encoding ─────────────────────────────────
-        img_pe = self.prompt_encoder.get_dense_pe((32, 32))  # [1,1280,32,32]
+        img_pe = self.prompt_encoder.get_dense_pe((self.feat_hw, self.feat_hw))  # [1,1280,H,W]
 
         # ── Run decoder ───────────────────────────────────────────────
         out = self.decoder(
@@ -120,8 +122,9 @@ class CoreMLDecoderWrapper(nn.Module):
 # ══════════════════════════════════════════════════════════════════════════
 # Monkey-patches for trace-hostile code
 # ══════════════════════════════════════════════════════════════════════════
-def patch_for_coreml_trace(wrapper):
+def patch_for_coreml_trace(wrapper, size):
     """Apply fixed-shape patches to eliminate aten::Int nodes."""
+    feat_hw = size // 16
 
     # ── Patch 1: PromptEncoder.forward (bypass _embed_keypoints loop) ──
     def _prompt_encoder_forward_fixed(self, keypoints, boxes=None, masks=None):
@@ -143,16 +146,16 @@ def patch_for_coreml_trace(wrapper):
         _prompt_encoder_forward_fixed, wrapper.prompt_encoder
     )
 
-    # ── Patch 2: PositionEmbeddingRandom.forward (fixed h=w=32) ────────
-    def _pe_forward_fixed(self, size):
+    # ── Patch 2: PositionEmbeddingRandom.forward (fixed h=w=feat_hw) ────────
+    def _pe_forward_fixed(self, _size):
         device = self.positional_encoding_gaussian_matrix.device
-        grid = torch.ones((32, 32), device=device, dtype=torch.float32)
+        grid = torch.ones((feat_hw, feat_hw), device=device, dtype=torch.float32)
         y_embed = grid.cumsum(dim=0) - 0.5
         x_embed = grid.cumsum(dim=1) - 0.5
-        y_embed = y_embed / 32.0
-        x_embed = x_embed / 32.0
+        y_embed = y_embed / float(feat_hw)
+        x_embed = x_embed / float(feat_hw)
         pe = self._pe_encoding(torch.stack([x_embed, y_embed], dim=-1))
-        return pe.permute(2, 0, 1)  # C x 32 x 32
+        return pe.permute(2, 0, 1)  # C x feat_hw x feat_hw
 
     wrapper.prompt_encoder.pe_layer.forward = types.MethodType(
         _pe_forward_fixed, wrapper.prompt_encoder.pe_layer
@@ -207,6 +210,7 @@ def main():
     )
     ap.add_argument("--verify-only", action="store_true",
                     help="Only verify feasibility, don't save")
+    ap.add_argument("--size", type=int, default=512, help="Original backbone size")
     args = ap.parse_args()
 
     # ── Load model ────────────────────────────────────────────────────
@@ -218,17 +222,18 @@ def main():
 
     # ── Build wrapper ─────────────────────────────────────────────────
     print("Building wrapper...", flush=True)
-    wrapper = CoreMLDecoderWrapper(model)
+    wrapper = CoreMLDecoderWrapper(model, args.size)
     wrapper.eval()
     wrapper.float()
 
     print("Applying patches...", flush=True)
-    patch_for_coreml_trace(wrapper)
+    patch_for_coreml_trace(wrapper, args.size)
 
     # ── Fixed dummy inputs ────────────────────────────────────────────
-    feat = torch.randn(1, BACKBONE_DIM, FEAT_H, FEAT_W, dtype=torch.float32)
+    feat_hw = args.size // 16
+    feat = torch.randn(1, BACKBONE_DIM, feat_hw, feat_hw, dtype=torch.float32)
     cond = torch.randn(1, 3, dtype=torch.float32)
-    ray = torch.randn(1, 2, FEAT_H, FEAT_W, dtype=torch.float32)
+    ray = torch.randn(1, 2, feat_hw, feat_hw, dtype=torch.float32)
 
     # ── Smoke test ────────────────────────────────────────────────────
     print("Smoke test forward...", flush=True)
