@@ -77,6 +77,11 @@ struct CommonConfig
     bool        use_trt        = false;
     bool        fp16           = true;    // can be disabled with --no-fp16
 
+    // ── CoreML (macOS only) ──────────────────────────────────────────────────
+    std::string coreml_backbone_path;
+    std::string coreml_decoder_path;
+    std::string coreml_yolo_path;
+
     // ── YOLO person detector tuning ──────────────────────────────────────────
     // The renderer doesn't use these (it inherits whatever the pipeline
     // chose internally) but accepting them keeps the CLI uniform — passing
@@ -136,6 +141,11 @@ inline bool parse_common_arg(int argc, const char* const* argv, int& i,
     CLI_BOOL("--trt",                  use_trt, true)
     CLI_BOOL("--no-fp16",              fp16,    false)
 
+    // CoreML
+    CLI_STR ("--coreml-backbone",      coreml_backbone_path)
+    CLI_STR ("--coreml-decoder",       coreml_decoder_path)
+    CLI_STR ("--coreml-yolo",          coreml_yolo_path)
+
     // YOLO tuning
     CLI_FLT ("--thresh",               person_thresh)
     CLI_FLT ("--nms",                  person_nms_iou)
@@ -177,6 +187,9 @@ inline void apply_common_to_pipeline_cfg(const CommonConfig& c,
     pc.cuda_device    = c.cuda_device;
     pc.use_trt_ep     = c.use_trt;
     pc.use_fp16       = c.fp16;
+    pc.coreml_backbone_path = c.coreml_backbone_path;
+    pc.coreml_decoder_path  = c.coreml_decoder_path;
+    pc.coreml_yolo_path     = c.coreml_yolo_path;
     pc.person_thresh  = c.person_thresh;
     pc.person_nms_iou = c.person_nms_iou;
 }
@@ -203,6 +216,9 @@ inline void print_common_args_help(FILE* fp)
         "  --cuda     N                   CUDA device (-1 = CPU; default 0)\n"
         "  --trt                          Use ONNX Runtime TensorRT EP\n"
         "  --no-fp16                      Disable FP16\n"
+        "  --coreml-backbone PATH         CoreML backbone .mlpackage (macOS)\n"
+        "  --coreml-decoder  PATH         CoreML decoder  .mlpackage (macOS)\n"
+        "  --coreml-yolo     PATH         CoreML YOLO     .mlpackage (macOS)\n"
         "  --thresh   F                   YOLO person confidence (default 0.50)\n"
         "  --nms      F                   YOLO NMS IoU (default 0.45)\n"
         "  --bvh      PATH                Write BVH motion-capture file(s); per-person filenames appended\n"

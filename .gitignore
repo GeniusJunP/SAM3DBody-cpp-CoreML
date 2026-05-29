@@ -34,10 +34,12 @@ error.txt
 screen*.jpg
 test_contiguous.cpp
 test.jpg
+person.jpg
 
 # Test data (large media)
 scripts/*.avi
 scripts/*.mp4
+*.mp4
 
 # Generated output
 joints.csv

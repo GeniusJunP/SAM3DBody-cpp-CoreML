@@ -561,6 +561,9 @@ int main(int argc, const char** argv) {
         cfg.cuda_device     = cuda_device;
         cfg.use_trt_ep      = use_trt;
         cfg.use_fp16        = fp16;
+        cfg.coreml_backbone_path = cc.coreml_backbone_path;
+        cfg.coreml_decoder_path  = cc.coreml_decoder_path;
+        cfg.coreml_yolo_path     = cc.coreml_yolo_path;
         cfg.skip_body_model = true;    // LBS runs natively in C; skip body_model.onnx
         if (!pipeline.load(cfg)) {
             fprintf(stderr, "Failed to load pipeline\n"); return 1;
