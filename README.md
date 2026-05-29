@@ -4,7 +4,7 @@ Standalone C++ inference engine for **SAM-3D-Body** — zero Python dependency a
 
 Takes a BGR image and produces per-person MHR body pose parameters, camera translation, and optionally full 3D mesh vertices + 70 body/hand keypoints, all via ONNX Runtime + ggml.
 
-✨ **Apple Silicon Support**: Features a CoreML backend (`coreml_export/`) for macOS.
+**Apple Silicon Support**: Features a CoreML backend ([coreml_export/README.md](coreml_export/README.md)) for macOS.
 
 Also includes Python frontends that call the compiled shared library via ctypes, and a CSV exporter for the 70 MHR keypoints.
 
@@ -136,7 +136,7 @@ BGR image
       extracted once by tools/extract_lbs_data.py
 ```
 
-> **⚡ Apple Silicon (macOS) Acceleration**: On M1/M2/M3 Macs, YOLO, Backbone, and Decoder can be offloaded to GPU/ANE using native CoreML. See [`coreml_export/README.md`](coreml_export/README.md) for details.
+> **Apple Silicon (macOS) Acceleration**: On Apple Silicon Macs, YOLO, Backbone, and Decoder can be offloaded to GPU/ANE using native CoreML. See [`coreml_export/README.md`](coreml_export/README.md) for details.
 
 > **Note:** `body_model.onnx` export is blocked on PyTorch ≥ 2.x (torch.export rejects
 > TorchScript modules). The native C LBS path reads `body_model.lbs` directly and
@@ -254,6 +254,8 @@ Outputs in `build/`:
 ## Running
 
 ### CLI executable
+
+> for CoreML inference, see `[coreml_export/README.md](coreml_export/README.md)`
 
 ```bash
 cd fast_sam_3dbody_cpp/build
@@ -919,4 +921,3 @@ and of course the Meta AI team behind the awesome paper that proposes the SAM 3D
   year={2026}
 }
 ```
-

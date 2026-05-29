@@ -1,11 +1,12 @@
-# SAM-3D-Body CoreML Export & Build Guide
+# SAM-3D-Body CoreML Export/Build Guide
 
-Apple Silicon (M1/M2/M3) 向けにCoreMLネイティブモデルをエクスポート・ビルドするためのガイドです。
+Apple Silicon 向けにCoreMLネイティブモデルをエクスポート・ビルドするためのガイドです。
 
 以下のコマンドはすべてリポジトリルート（`SAM3DBody-cpp/`）から実行します。
 
 ## 1. 環境構築
 
+※ モデルのコンパイル（`xcrun`）に必要となるため、あらかじめ Xcode Command Line Tools をインストールしておいてください。 `xcode-select --install`  
 ※ `coremltools 9.0` は `torch==2.7.0` までテストされています。
 
 ```bash
