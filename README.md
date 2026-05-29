@@ -232,9 +232,9 @@ make -j$(nproc)
 **For macOS (Apple Silicon + CoreML):**
 Use the `Makefile` in the root directory to automatically export ONNX models to CoreML and build the C++ project.
 ```bash
-make models BACKBONE_SIZE=1024  # Export and compile .mlpackage
+make models BACKBONE_SIZE=512  # Export and compile .mlpackage
 make clean
-make BACKBONE_SIZE=1024         # Build fast_sam_3dbody_run with CoreML support
+make BACKBONE_SIZE=512         # Build fast_sam_3dbody_run with CoreML support
 ```
 
 CMake handles dependencies automatically:
@@ -860,15 +860,13 @@ fsb_destroy(h);
 
 ## Performance notes
 
-| Stage | Time (RTX 3090, B=1) |
-|-------|----------------------|
-| YOLO detection | ~5 ms |
-| Backbone (DINOv3-ViT-H) | ~150–200 ms |
-| Decoder (6-layer) | ~20 ms |
-| MHR + camera FFN (CPU) | <1 ms |
-| Native C LBS (optional) | <1 ms |
-
-> **macOS (M1/M2/M3)**: With the CoreML backend, inference runs locally in **~2 seconds/frame** (1024x1024 resolution).
+| Stage | Time (RTX 3090, B=1) | Time (Apple Silicon CoreML, B=1) |
+|-------|----------------------|----------------------------------|
+| YOLO detection | ~5 ms | ~17 ms |
+| Backbone (DINOv3-ViT-H) | ~150–200 ms | ~348 ms |
+| Decoder (6-layer) | ~20 ms | ~12 ms |
+| MHR + camera FFN (CPU) | <1 ms | ~3 ms |
+| Native C LBS (optional) | <1 ms | ~1 ms |
 
 - Backbone is the bottleneck; it dominates end-to-end latency.
 - Use `--skip-body` unless 3D vertices are required.
