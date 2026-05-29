@@ -70,3 +70,23 @@ make BACKBONE_SIZE=512
 >   --coreml-decoder coreml_export/decoder_coreml.mlpackage \
 >   --coreml-yolo coreml_export/yolo_coreml.mlpackage
 > ```
+
+## 5. 制限事項
+
+本リポジトリのCoreMLエクスポートは、バッチサイズ1（`B=1`）に固定されています。
+これは、PyTorchの `torch.jit.trace` を用いた際、Vision Transformer特有の空間次元からトークン列への展開処理（例: `[B, C, H, W]` から `[B, H*W, C]` への `reshape` や `flatten`）において、動的であるべきバッチ次元 `B` が計算済みの定数として固定化される仕様と、元のPyTorchモデルの制御フローが `torch.jit.script` に非対応であることに起因します。
+
+この制約により、C++推論エンジン側ではバッチ処理による並列化が行えず、以下のように検出された人数分だけシーケンシャルに推論を実行します。  
+  
+[src/coreml_backbone.mm](file:///Users/junpei/working/_testCode/SAM3DBody-cpp/src/coreml_backbone.mm#L125-L131)
+```cpp
+        for (int b = 0; b < batch; ++b) {
+            NSError* error = nil;
+            std::memcpy(impl_->cached_input.dataPointer,
+                        input_nchw + (size_t)b * input_elems,
+                        input_elems * sizeof(float));
+
+            id<MLFeatureProvider> result = [impl_->model predictionFromFeatures:impl_->cached_provider error:&error];
+```
+
+結果として、処理時間は画面内の人数に比例して増加します。実運用でのパフォーマンス低下を防ぐため、多数の人物が写るシーンでは `--max-persons` 引数による人数上限の設定を推奨します。

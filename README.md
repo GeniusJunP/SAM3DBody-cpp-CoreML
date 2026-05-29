@@ -1,3 +1,5 @@
+Special thanks to Ammar Qammaz for the original C++ implementation.  
+  
 # SAM3DBody-cpp
 
 Standalone C++ inference engine for **SAM-3D-Body** — zero Python dependency at runtime.
